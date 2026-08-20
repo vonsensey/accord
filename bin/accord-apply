@@ -1,0 +1,412 @@
+#!/usr/bin/python3
+"""accord-apply — make GTK4, GTK3, and (via qgtk3) Qt apps follow the Omarchy theme.
+
+Reads the active theme's colors.toml and writes @define-color overrides into
+~/.config/gtk-4.0/gtk.css and ~/.config/gtk-3.0/gtk.css — the only user-level
+lever libadwaita honors — plus the GNOME color-scheme/gtk-theme settings that
+Omarchy's installer sets once and never updates on theme switch.
+
+Read-only toward the theme. Writes exactly: the two css files (a marked,
+replaceable block; pre-existing user css is backed up once and preserved),
+two gsettings keys (originals saved for revert), and a state.json for the
+shell plugin. No network, no elevation.
+
+Shebang is /usr/bin/python3 on purpose: `python3` on PATH may be a mise shim
+without the system's tomllib/gi environment.
+"""
+
+import argparse
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+import time
+import tomllib
+from pathlib import Path
+
+HOME = Path.home()
+
+
+def _env_path(name: str, default: Path) -> Path:
+    v = os.environ.get(name)
+    return Path(v) if v else default
+
+
+THEME_DIR = _env_path("ACCORD_THEME_DIR", HOME / ".local/state/omarchy/current/theme")
+GTK4_CSS = _env_path("ACCORD_GTK4_CSS", HOME / ".config/gtk-4.0/gtk.css")
+GTK3_CSS = _env_path("ACCORD_GTK3_CSS", HOME / ".config/gtk-3.0/gtk.css")
+STATE_DIR = _env_path("ACCORD_STATE_DIR", HOME / ".local/state/omarchy/accord")
+STATE_FILE = STATE_DIR / "state.json"
+NO_GSETTINGS = os.environ.get("ACCORD_NO_GSETTINGS") == "1"
+
+BEGIN = "/* >>> accord:managed >>> generated from the active Omarchy theme; edits inside this block are overwritten */"
+END = "/* <<< accord:managed <<< */"
+BLOCK_RE = re.compile(re.escape(BEGIN) + r".*?" + re.escape(END) + r"\n?", re.DOTALL)
+
+# GTK4 apps read the user stylesheet only at process startup, so windowless
+# daemons keep painting the old palette until restarted. Only these well-known
+# D-Bus-activatable apps are ever touched, and never while they own a window.
+RESTART_ALLOWLIST = ["nautilus", "geary", "gnome-calendar", "gnome-text-editor",
+                     "loupe", "evince", "snapshot"]
+
+HEX_RE = re.compile(r"^#[0-9a-fA-F]{6}$")
+
+
+def parse_hex(value):
+    if isinstance(value, str) and HEX_RE.match(value.strip()):
+        return value.strip().lower()
+    return None
+
+
+def luma(hex_color: str) -> float:
+    r, g, b = (int(hex_color[i:i + 2], 16) for i in (1, 3, 5))
+    return 0.299 * r + 0.587 * g + 0.114 * b
+
+
+def on_color(base: str, candidates: list[str]) -> tuple[str, int]:
+    """The readable color to draw ON `base`: whichever candidate sits farthest
+    away in perceived luma. A naive is-the-accent-dark test fails on light
+    themes, where both accent and foreground can sit mid-range."""
+    base_l = luma(base)
+    best = max(candidates, key=lambda c: abs(luma(c) - base_l))
+    return best, round(abs(luma(best) - base_l))
+
+
+def load_theme(theme_dir: Path):
+    toml_path = theme_dir / "colors.toml"
+    try:
+        with open(toml_path, "rb") as f:
+            data = tomllib.load(f)
+    except (OSError, tomllib.TOMLDecodeError) as e:
+        print(f"accord: cannot read {toml_path}: {e}", file=sys.stderr)
+        return None
+
+    def col(*keys):
+        for k in keys:
+            v = parse_hex(data.get(k))
+            if v:
+                return v
+        return None
+
+    background = col("background")
+    foreground = col("foreground")
+    accent = col("accent", "blue")
+    if not (background and foreground and accent):
+        print(f"accord: {toml_path} lacks background/foreground/accent; nothing applied",
+              file=sys.stderr)
+        return None
+
+    return {
+        "mode": "light" if data.get("mode") == "light" else "dark",
+        "background": background,
+        "foreground": foreground,
+        "accent": accent,
+        "dark_background": col("dark_background", "background"),
+        "darker_background": col("darker_background", "dark_background", "background"),
+        "lighter_background": col("lighter_background", "background"),
+        "muted": col("muted", "dark_foreground", "foreground"),
+        "selection": col("selection", "lighter_background", "background"),
+        "red": col("red", "bright_red") or accent,
+        "green": col("green", "bright_green") or accent,
+        "yellow": col("yellow", "bright_yellow") or accent,
+        "magenta": col("magenta", "bright_magenta") or accent,
+    }
+
+
+def build_palette(t):
+    dark = t["mode"] == "dark"
+    if dark:
+        window_bg = t["background"]
+        view_bg = t["dark_background"]
+        headerbar_bg = t["darker_background"]
+        surface_bg = t["lighter_background"]     # cards, popovers, dialogs
+        sidebar_bg = t["dark_background"]
+    else:
+        # Light themes invert: the view (content) keeps the lightest tone,
+        # chrome around it steps down — the Adwaita-light relationship.
+        window_bg = t["dark_background"]
+        view_bg = t["background"]
+        headerbar_bg = t["darker_background"]
+        surface_bg = t["background"]
+        sidebar_bg = t["dark_background"]
+
+    fg = t["foreground"]
+    on_accent, separation = on_color(t["accent"], [t["background"], t["foreground"]])
+    shade = "rgba(0, 0, 0, 0.36)" if dark else "rgba(0, 0, 6, 0.07)"
+
+    return {
+        "mode": t["mode"],
+        "window_bg": window_bg, "view_bg": view_bg, "headerbar_bg": headerbar_bg,
+        "surface_bg": surface_bg, "sidebar_bg": sidebar_bg, "fg": fg,
+        "accent": t["accent"], "on_accent": on_accent, "separation": separation,
+        "muted": t["muted"], "selection": t["selection"], "shade": shade,
+        "red": t["red"], "green": t["green"], "yellow": t["yellow"],
+        "on_red": on_color(t["red"], [t["background"], t["foreground"]])[0],
+        "on_green": on_color(t["green"], [t["background"], t["foreground"]])[0],
+        "on_yellow": on_color(t["yellow"], [t["background"], t["foreground"]])[0],
+        "magenta": t["magenta"],
+    }
+
+
+def gtk4_defines(p):
+    return {
+        "accent_bg_color": p["accent"], "accent_fg_color": p["on_accent"],
+        "accent_color": p["accent"],
+        "destructive_bg_color": p["red"], "destructive_fg_color": p["on_red"],
+        "destructive_color": p["red"],
+        "success_bg_color": p["green"], "success_fg_color": p["on_green"],
+        "success_color": p["green"],
+        "warning_bg_color": p["yellow"], "warning_fg_color": p["on_yellow"],
+        "warning_color": p["yellow"],
+        "error_bg_color": p["red"], "error_fg_color": p["on_red"],
+        "error_color": p["red"],
+        "window_bg_color": p["window_bg"], "window_fg_color": p["fg"],
+        "view_bg_color": p["view_bg"], "view_fg_color": p["fg"],
+        "headerbar_bg_color": p["headerbar_bg"], "headerbar_fg_color": p["fg"],
+        "headerbar_border_color": p["fg"],
+        "headerbar_backdrop_color": p["window_bg"],
+        "headerbar_shade_color": p["shade"],
+        "headerbar_darker_shade_color": p["shade"],
+        "sidebar_bg_color": p["sidebar_bg"], "sidebar_fg_color": p["fg"],
+        "sidebar_backdrop_color": p["window_bg"],
+        "sidebar_shade_color": p["shade"],
+        "sidebar_border_color": p["shade"],
+        "secondary_sidebar_bg_color": p["sidebar_bg"],
+        "secondary_sidebar_fg_color": p["fg"],
+        "secondary_sidebar_backdrop_color": p["window_bg"],
+        "secondary_sidebar_shade_color": p["shade"],
+        "secondary_sidebar_border_color": p["shade"],
+        "card_bg_color": p["surface_bg"], "card_fg_color": p["fg"],
+        "card_shade_color": p["shade"],
+        "dialog_bg_color": p["surface_bg"], "dialog_fg_color": p["fg"],
+        "popover_bg_color": p["surface_bg"], "popover_fg_color": p["fg"],
+        "popover_shade_color": p["shade"],
+        "thumbnail_bg_color": p["surface_bg"], "thumbnail_fg_color": p["fg"],
+        "shade_color": p["shade"],
+        "scrollbar_outline_color": p["shade"],
+    }
+
+
+def gtk3_defines(p):
+    return {
+        "theme_bg_color": p["window_bg"], "theme_fg_color": p["fg"],
+        "theme_base_color": p["view_bg"], "theme_text_color": p["fg"],
+        "theme_selected_bg_color": p["accent"], "theme_selected_fg_color": p["on_accent"],
+        "theme_unfocused_bg_color": p["window_bg"], "theme_unfocused_fg_color": p["fg"],
+        "theme_unfocused_base_color": p["view_bg"], "theme_unfocused_text_color": p["fg"],
+        "theme_unfocused_selected_bg_color": p["accent"],
+        "theme_unfocused_selected_fg_color": p["on_accent"],
+        "insensitive_bg_color": p["window_bg"], "insensitive_fg_color": p["muted"],
+        "insensitive_base_color": p["view_bg"],
+        "borders": p["selection"], "unfocused_borders": p["selection"],
+        "link_color": p["accent"], "link_visited_color": p["magenta"],
+        "success_color": p["green"], "warning_color": p["yellow"], "error_color": p["red"],
+    }
+
+
+def render_block(defines: dict) -> str:
+    lines = [BEGIN]
+    lines += [f"@define-color {name} {value};" for name, value in defines.items()]
+    lines.append(END)
+    return "\n".join(lines) + "\n"
+
+
+def write_managed(path: Path, block: str) -> str:
+    """Install `block` as the accord-managed region of `path`.
+    Returns created | updated | unchanged | merged."""
+    if not path.exists():
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(block, encoding="utf-8")
+        return "created"
+
+    text = path.read_text(encoding="utf-8")
+    if BEGIN in text and END in text:
+        new = BLOCK_RE.sub(lambda _: block, text, count=1)
+        if new == text:
+            return "unchanged"
+        path.write_text(new, encoding="utf-8")
+        return "updated"
+
+    # Someone else's css: keep every byte, once, in a backup we can restore,
+    # and put our block FIRST so later user rules win on any conflict.
+    backup = path.with_name(path.name + ".accord-backup")
+    if not backup.exists():
+        shutil.copy2(path, backup)
+    path.write_text(block + "\n" + text, encoding="utf-8")
+    return "merged"
+
+
+def revert_file(path: Path):
+    backup = path.with_name(path.name + ".accord-backup")
+    if backup.exists():
+        shutil.move(backup, path)
+        return "restored-backup"
+    if not path.exists():
+        return "absent"
+    text = path.read_text(encoding="utf-8")
+    if BEGIN not in text:
+        return "untouched"
+    remainder = BLOCK_RE.sub("", text, count=1)
+    if remainder.strip() == "":
+        path.unlink()
+        return "removed"
+    path.write_text(remainder.lstrip("\n"), encoding="utf-8")
+    return "stripped"
+
+
+def gsettings_get(key: str):
+    try:
+        out = subprocess.run(
+            ["gsettings", "get", "org.gnome.desktop.interface", key],
+            capture_output=True, text=True, timeout=10)
+        return out.stdout.strip().strip("'") if out.returncode == 0 else None
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+
+
+def gsettings_set(key: str, value: str) -> bool:
+    try:
+        return subprocess.run(
+            ["gsettings", "set", "org.gnome.desktop.interface", key, value],
+            capture_output=True, timeout=10).returncode == 0
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+
+
+def load_state():
+    try:
+        with open(STATE_FILE, encoding="utf-8") as f:
+            return json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
+def windowed_pids() -> set | None:
+    """PIDs owning a visible Hyprland window, or None if that cannot be known."""
+    try:
+        out = subprocess.run(["hyprctl", "clients", "-j"],
+                             capture_output=True, text=True, timeout=10)
+        if out.returncode != 0:
+            return None
+        return {c["pid"] for c in json.loads(out.stdout) if c.get("pid")}
+    except (OSError, subprocess.TimeoutExpired, json.JSONDecodeError, TypeError):
+        return None
+
+
+def restart_apps():
+    """SIGTERM allowlisted GTK daemons so they relaunch with the new palette.
+    An app with an open window is never killed — it repaints on next launch."""
+    visible = windowed_pids()
+    if visible is None:
+        # Can't tell windowed from windowless: restarting blind could close
+        # something the user is looking at. Do nothing and say so.
+        return [], list(RESTART_ALLOWLIST)
+    restarted, pending = [], []
+    for name in RESTART_ALLOWLIST:
+        try:
+            out = subprocess.run(["pgrep", "-x", name],
+                                 capture_output=True, text=True, timeout=10)
+        except (OSError, subprocess.TimeoutExpired):
+            continue
+        if out.returncode != 0:
+            continue
+        pids = [int(p) for p in out.stdout.split() if p.isdigit()]
+        if any(p in visible for p in pids):
+            pending.append(name)
+            continue
+        for p in pids:
+            try:
+                os.kill(p, 15)
+            except OSError:
+                pass
+        if pids:
+            restarted.append(name)
+    return restarted, pending
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument("--no-restart", action="store_true",
+                    help="do not restart windowless GTK daemons")
+    ap.add_argument("--revert", action="store_true",
+                    help="remove everything accord wrote and restore saved settings")
+    args = ap.parse_args()
+
+    if args.revert:
+        state = load_state()
+        r4 = revert_file(GTK4_CSS)
+        r3 = revert_file(GTK3_CSS)
+        saved = state.get("gsettings", {}).get("saved") or {}
+        if not NO_GSETTINGS:
+            for key, value in saved.items():
+                if value:
+                    gsettings_set(key, value)
+        STATE_FILE.unlink(missing_ok=True)
+        print(f"accord: reverted (gtk4: {r4}, gtk3: {r3}, "
+              f"gsettings: {'restored' if saved else 'untouched'})")
+        return 0
+
+    theme = load_theme(THEME_DIR)
+    if theme is None:
+        return 0  # stay quiet and harmless on broken input; stderr has the why
+
+    p = build_palette(theme)
+    theme_name = re.sub(r"[^A-Za-z0-9 _.-]", "-", THEME_DIR.resolve().name)
+
+    s4 = write_managed(GTK4_CSS, render_block(gtk4_defines(p)))
+    s3 = write_managed(GTK3_CSS, render_block(gtk3_defines(p)))
+
+    prev = load_state()
+    gsettings = {"applied": False,
+                 "saved": prev.get("gsettings", {}).get("saved")}
+    if not NO_GSETTINGS:
+        if gsettings["saved"] is None:
+            gsettings["saved"] = {"color-scheme": gsettings_get("color-scheme"),
+                                  "gtk-theme": gsettings_get("gtk-theme")}
+        scheme = "prefer-light" if p["mode"] == "light" else "prefer-dark"
+        gtk_theme = "Adwaita" if p["mode"] == "light" else "Adwaita-dark"
+        ok1 = gsettings_set("color-scheme", scheme)
+        ok2 = gsettings_set("gtk-theme", gtk_theme)
+        gsettings.update({"applied": ok1 and ok2,
+                          "color_scheme": scheme, "gtk_theme": gtk_theme})
+
+    restarted, pending = ([], [])
+    if not args.no_restart and s4 in ("created", "updated", "merged"):
+        restarted, pending = restart_apps()
+
+    STATE_DIR.mkdir(parents=True, exist_ok=True)
+    state = {
+        "schemaVersion": 1,
+        "generatedAt": int(time.time()),
+        "generatedAtIso": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+        "theme": theme_name,
+        "mode": p["mode"],
+        "palette": {
+            "window_bg": p["window_bg"], "view_bg": p["view_bg"],
+            "headerbar_bg": p["headerbar_bg"], "surface_bg": p["surface_bg"],
+            "sidebar_bg": p["sidebar_bg"], "fg": p["fg"],
+            "accent": p["accent"], "on_accent": p["on_accent"],
+            "separation": p["separation"], "muted": p["muted"],
+            "red": p["red"], "green": p["green"], "yellow": p["yellow"],
+        },
+        "files": {
+            "gtk4": {"path": str(GTK4_CSS), "status": s4},
+            "gtk3": {"path": str(GTK3_CSS), "status": s3},
+        },
+        "gsettings": gsettings,
+        "restarts": {"restarted": restarted, "pending": pending},
+    }
+    tmp = STATE_FILE.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(state, indent=1) + "\n", encoding="utf-8")
+    tmp.replace(STATE_FILE)
+
+    print(f"accord: {theme_name} ({p['mode']}) → gtk4 {s4}, gtk3 {s3}"
+          + (f", restarted {','.join(restarted)}" if restarted else "")
+          + (f", pending {','.join(pending)}" if pending else ""))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

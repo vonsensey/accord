@@ -1,0 +1,31 @@
+{
+  "schemaVersion": 1,
+  "id": "io.github.vonsensey.accord",
+  "name": "Accord",
+  "version": "1.0.0",
+  "author": "vonsensey",
+  "license": "MIT",
+  "description": "Omarchy themes your terminal, editor, and shell beautifully. Accord does the rest: GTK4, GTK3, and Qt apps follow your theme - light and dark, live. Fixes the unthemed-Nautilus problem in one enable.",
+  "kinds": ["service", "bar-widget", "panel"],
+  "keepLoaded": true,
+  "entryPoints": {
+    "service": "Service.qml",
+    "barWidget": "BarWidget.qml",
+    "panel": "Panel.qml"
+  },
+  "barWidget": {
+    "displayName": "Accord",
+    "description": "GTK & Qt apps follow your Omarchy theme. The dot wears the current accent; click for the palette panel.",
+    "category": "Appearance",
+    "allowMultiple": false,
+    "defaultSection": "right",
+    "defaults": {
+      "autoApply": "On",
+      "restartApps": "On"
+    },
+    "schema": [
+      { "key": "autoApply", "type": "enum", "label": "Apply automatically on theme switch", "options": ["On", "Off"], "defaultValue": "On" },
+      { "key": "restartApps", "type": "enum", "label": "Restart background GTK apps after applying", "options": ["On", "Off"], "defaultValue": "On", "description": "GTK4 apps read the palette only at startup. Accord restarts known windowless app daemons (Nautilus and friends) so they repaint; apps with open windows are never touched." }
+    ]
+  }
+}
