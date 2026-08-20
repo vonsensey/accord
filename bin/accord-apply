@@ -445,10 +445,23 @@ def do_revert() -> int:
     saved = state.get("gsettings", {}).get("saved") or {}
     restored, failed = [], []
     if not NO_GSETTINGS:
-        for key, value in saved.items():
-            if not value:
-                continue
-            (restored if gsettings_set(key, value) else failed).append(key)
+        # Prefer handing the keys back to Omarchy itself: theme-set-gnome
+        # recomputes mode-correct values for the CURRENT theme, which beats
+        # restoring a snapshot that may predate several theme switches.
+        handed_back = False
+        if shutil.which("omarchy-theme-set-gnome"):
+            try:
+                handed_back = subprocess.run(["omarchy-theme-set-gnome"],
+                                             capture_output=True, timeout=15).returncode == 0
+            except (OSError, subprocess.TimeoutExpired):
+                handed_back = False
+        if handed_back:
+            restored = ["via omarchy-theme-set-gnome"]
+        else:
+            for key, value in saved.items():
+                if not value:
+                    continue
+                (restored if gsettings_set(key, value) else failed).append(key)
     if failed:
         # Keep state.json so the saved originals survive for a retry.
         print(f"accord: reverted css (gtk4: {r4}, gtk3: {r3}) but could not "

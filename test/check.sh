@@ -261,7 +261,7 @@ esac
 FAKE
 chmod +x "$FAKEBIN/gsettings"
 GS="$WORK/gsettings-run"; mkdir -p "$GS"
-PATH="$FAKEBIN:$PATH" \
+PATH="$FAKEBIN:/usr/bin:/bin" \
 ACCORD_THEME_DIR="$HERE/fixtures/accord-dark" \
 ACCORD_GTK4_CSS="$GS/gtk.css" ACCORD_GTK3_CSS="$GS/gtk3.css" \
 ACCORD_STATE_DIR="$GS/state" "$APPLY" --no-restart >/dev/null
@@ -269,7 +269,7 @@ assert "gsettings: originals captured on first apply" \
   "$(jq -e '.gsettings.saved["gtk-theme"] == "MyUserTheme"' "$GS/state/state.json" >/dev/null; echo $?)"
 assert "gsettings: dark theme applied Adwaita-dark to live settings" \
   "$(grep -q 'gtk-theme Adwaita-dark' "$GSTATE"; echo $?)"
-PATH="$FAKEBIN:$PATH" \
+PATH="$FAKEBIN:/usr/bin:/bin" \
 ACCORD_THEME_DIR="$HERE/fixtures/accord-light" \
 ACCORD_GTK4_CSS="$GS/gtk.css" ACCORD_GTK3_CSS="$GS/gtk3.css" \
 ACCORD_STATE_DIR="$GS/state" "$APPLY" --no-restart >/dev/null
@@ -277,18 +277,46 @@ assert "gsettings: light theme flips to prefer-light + Adwaita" \
   "$(grep -q 'color-scheme prefer-light' "$GSTATE" && grep -q 'gtk-theme Adwaita$' "$GSTATE"; echo $?)"
 assert "gsettings: originals NOT overwritten on second apply" \
   "$(jq -e '.gsettings.saved["gtk-theme"] == "MyUserTheme"' "$GS/state/state.json" >/dev/null; echo $?)"
-PATH="$FAKEBIN:$PATH" \
+# Revert path A: omarchy-theme-set-gnome FAILS -> falls back to the saved
+# originals. (Omarchy installs into /usr/bin, so absence cannot be simulated
+# by PATH alone; a failing shim covers the same fallback branch.)
+cat > "$FAKEBIN/omarchy-theme-set-gnome" <<'FAKE'
+#!/usr/bin/env bash
+exit 1
+FAKE
+chmod +x "$FAKEBIN/omarchy-theme-set-gnome"
+PATH="$FAKEBIN:/usr/bin:/bin" \
 ACCORD_THEME_DIR="$HERE/fixtures/accord-light" \
 ACCORD_GTK4_CSS="$GS/gtk.css" ACCORD_GTK3_CSS="$GS/gtk3.css" \
 ACCORD_STATE_DIR="$GS/state" "$APPLY" --revert >/dev/null
-assert "gsettings: revert restores the user's original values" \
+assert "gsettings: revert falls back to saved originals when theme-set-gnome fails" \
   "$(grep -q 'gtk-theme MyUserTheme' "$GSTATE" && grep -q 'color-scheme prefer-dark' "$GSTATE"; echo $?)"
+
+# Revert path B: when omarchy-theme-set-gnome exists, revert hands the keys
+# back to Omarchy (mode-correct for the CURRENT theme) instead of restoring
+# a possibly-stale snapshot.
+cat > "$FAKEBIN/omarchy-theme-set-gnome" <<FAKE
+#!/usr/bin/env bash
+grep -v '^gtk-theme ' "$GSTATE" > "$GSTATE.n"; echo "gtk-theme StockCorrect" >> "$GSTATE.n"; mv "$GSTATE.n" "$GSTATE"
+FAKE
+chmod +x "$FAKEBIN/omarchy-theme-set-gnome"
+PATH="$FAKEBIN:/usr/bin:/bin" \
+ACCORD_THEME_DIR="$HERE/fixtures/accord-light" \
+ACCORD_GTK4_CSS="$GS/gtk.css" ACCORD_GTK3_CSS="$GS/gtk3.css" \
+ACCORD_STATE_DIR="$GS/state" "$APPLY" >/dev/null
+PATH="$FAKEBIN:/usr/bin:/bin" \
+ACCORD_THEME_DIR="$HERE/fixtures/accord-light" \
+ACCORD_GTK4_CSS="$GS/gtk.css" ACCORD_GTK3_CSS="$GS/gtk3.css" \
+ACCORD_STATE_DIR="$GS/state" "$APPLY" --revert >/dev/null
+assert "gsettings: revert prefers handing keys back to omarchy-theme-set-gnome" \
+  "$(grep -q 'gtk-theme StockCorrect' "$GSTATE"; echo $?)"
+rm -f "$FAKEBIN/omarchy-theme-set-gnome"
 
 # ------------------ run 13: poisoned None originals recover on the next apply
 PO="$WORK/poison"; mkdir -p "$PO/state"
 printf '{"schemaVersion":1,"gsettings":{"saved":{"color-scheme":null,"gtk-theme":null}}}\n' > "$PO/state/state.json"
 printf "color-scheme prefer-dark\ngtk-theme RealTheme\n" > "$GSTATE"
-PATH="$FAKEBIN:$PATH" \
+PATH="$FAKEBIN:/usr/bin:/bin" \
 ACCORD_THEME_DIR="$HERE/fixtures/accord-dark" \
 ACCORD_GTK4_CSS="$PO/gtk.css" ACCORD_GTK3_CSS="$PO/gtk3.css" \
 ACCORD_STATE_DIR="$PO/state" "$APPLY" --no-restart >/dev/null
