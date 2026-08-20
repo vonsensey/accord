@@ -4,11 +4,15 @@
 Accord does the rest: GTK4, GTK3, and Qt apps follow your theme — light and
 dark, live.**
 
+![The fitting room: browse every theme, try it on, Esc snaps back](preview.png)
+
 Open Nautilus on a stock Omarchy box and it renders in generic Adwaita,
 ignoring your theme's colors entirely. Omarchy flips those apps between light
 and dark mode when you switch themes — but that is all they ever get: the same
 default grey in every theme, never *your* background, *your* text color,
 *your* accent. Your desktop wears Ristretto; your apps wear beige.
+
+![Stock generic Adwaita vs Accord applying the theme's actual colors](docs/img/bridge.png)
 
 Accord closes that gap. Enable it once and every theme switch carries your
 whole desktop with it:
