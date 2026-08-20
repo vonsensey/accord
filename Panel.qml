@@ -101,6 +101,16 @@ Item {
     Rectangle { anchors.fill: parent; color: root.scrim }
     MouseArea { anchors.fill: parent; onClicked: root.close() }
 
+    // Esc must snap back no matter which control holds keyboard focus - the
+    // keyCatcher's Keys handler goes deaf once focus wanders into a child
+    // control. A window-context shortcut always fires.
+    Shortcut {
+      enabled: root.opened
+      sequence: "Escape"
+      context: Qt.WindowShortcut
+      onActivated: root.snapBack()
+    }
+
     BorderSurface {
       id: card
       width: Math.min(Style.space(660), panel.width - Style.gapsOut * 2)
