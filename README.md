@@ -19,8 +19,8 @@ whole desktop with it:
 - **GTK3** apps — themed through the classic named-color set in
   `~/.config/gtk-3.0/gtk.css`.
 - **Qt 5 / Qt 6** apps — Omarchy ships `QT_QPA_PLATFORMTHEME=gtk3`, so Qt
-  derives its palette from the GTK3 theme Accord just wrote. No qt5ct, no
-  Kvantum, no extra machinery.
+  derives its default palette from the GTK3 theme Accord just wrote. No
+  qt5ct, no Kvantum, no extra machinery.
 - **Light themes actually go light.** Accord flips `color-scheme` and
   `gtk-theme` to match the theme's declared mode — the half of the problem
   nobody sees until they try Catppuccin Latte.
@@ -109,6 +109,9 @@ and revert.
 
 - **Qt apps pick the palette up at launch**, not live — qgtk3 reads the GTK
   theme when the app starts. Launch after a theme switch and it matches.
+- **Qt apps that manage their own colors keep them.** OBS ships its own Yami
+  theme; KDE apps can force a color scheme. The qgtk3 palette is the
+  default, not an override.
 - **GTK3 recoloring covers apps that use the standard named colors**
   (anything Adwaita-based — the default on Omarchy). A GTK3 app shipping its
   own hand-rolled theme may only partially follow.
