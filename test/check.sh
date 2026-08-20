@@ -354,6 +354,16 @@ XDG_STATE_HOME="$XS" ACCORD_NO_GSETTINGS=1 \
 assert "XDG_STATE_HOME: state lands where the shell service watches" \
   "$(jq -e '.schemaVersion == 1' "$XS/omarchy/accord/state.json" >/dev/null; echo $?)"
 
+# -------------------- run 15b: theme.name sibling names the theme (omarchy 4)
+NM="$WORK/named/current"; mkdir -p "$NM/theme"
+cp "$HERE/fixtures/accord-dark/colors.toml" "$NM/theme/"
+printf 'ristretto\n' > "$NM/theme.name"
+ACCORD_THEME_DIR="$NM/theme" \
+ACCORD_GTK4_CSS="$WORK/named-gtk4.css" ACCORD_GTK3_CSS="$WORK/named-gtk3.css" \
+ACCORD_STATE_DIR="$WORK/named-state" ACCORD_NO_GSETTINGS=1 "$APPLY" --no-restart >/dev/null
+assert "theme.name sibling wins over the directory name" \
+  "$([ "$(jq -r .theme "$WORK/named-state/state.json")" = ristretto ]; echo $?)"
+
 # ------------------------------ run 16: define-set completeness is pinned
 run_apply "$HERE/fixtures/accord-dark" >/dev/null
 assert "gtk4 css defines exactly 47 colors" \

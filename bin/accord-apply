@@ -341,6 +341,19 @@ def gsettings_set(key: str, value: str) -> bool:
         return False
 
 
+def display_name(theme_dir: Path) -> str:
+    """omarchy 4 keeps current/theme as a real directory (its contents are
+    copied on switch) with the human name in a theme.name sibling; a plain
+    theme directory just uses its own name."""
+    try:
+        name = (theme_dir.parent / "theme.name").read_text(encoding="utf-8").strip()
+    except OSError:
+        name = ""
+    if not name:
+        name = theme_dir.resolve().name
+    return re.sub(r"[^A-Za-z0-9 _.-]", "-", name)[:64]
+
+
 def load_state():
     try:
         with open(STATE_FILE, encoding="utf-8") as f:
@@ -471,7 +484,7 @@ def main():
         return 3
 
     p = build_palette(theme)
-    theme_name = re.sub(r"[^A-Za-z0-9 _.-]", "-", THEME_DIR.resolve().name)
+    theme_name = display_name(THEME_DIR)
 
     prev = load_state()
     gsettings = {"applied": False,
