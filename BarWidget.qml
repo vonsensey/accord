@@ -28,17 +28,59 @@ BarWidget {
   implicitWidth: root.vertical ? barSize : dot.width + Style.space(14)
   implicitHeight: root.vertical ? dot.height + Style.space(14) : barSize
 
-  Rectangle {
+  // The palette wheel: six segments painted from the palette Accord actually
+  // wrote to disk - the icon IS the feature, not a generic dot. Hollow until
+  // the first apply (enabled but not yet run).
+  Item {
     id: dot
     width: Style.space(12)
     height: width
-    radius: width / 2
     anchors.centerIn: parent
-    color: root.accentColor
-    border.width: Math.max(1, Style.spaceReal(1))
-    border.color: root.bar ? root.bar.barForeground : Color.foreground
-    // Before the first apply the dot is hollow: enabled but not yet run.
     opacity: root.applied ? 1.0 : 0.45
+
+    // Hue order reads as a color wheel; any key an older state.json lacks
+    // falls back to the accent so the wheel never shows holes.
+    readonly property var wheel: {
+      var p = root.palette
+      var a = String(root.accentColor)
+      if (!p) return []
+      return [p.red || a, p.yellow || a, p.green || a,
+              p.cyan || a, p.blue || a, p.magenta || a]
+    }
+    onWheelChanged: canvas.requestPaint()
+
+    Canvas {
+      id: canvas
+      anchors.fill: parent
+      visible: root.applied
+      antialiasing: true
+      Component.onCompleted: requestPaint()
+      onPaint: {
+        var ctx = getContext("2d")
+        ctx.reset()
+        var colors = dot.wheel
+        if (!colors.length) return
+        var cx = width / 2, cy = height / 2, r = Math.min(cx, cy)
+        for (var i = 0; i < colors.length; i++) {
+          ctx.beginPath()
+          ctx.moveTo(cx, cy)
+          ctx.arc(cx, cy, r,
+                  (i / colors.length) * 2 * Math.PI - Math.PI / 2,
+                  ((i + 1) / colors.length) * 2 * Math.PI - Math.PI / 2)
+          ctx.closePath()
+          ctx.fillStyle = String(colors[i])
+          ctx.fill()
+        }
+      }
+    }
+
+    Rectangle {
+      anchors.fill: parent
+      radius: width / 2
+      color: "transparent"
+      border.width: Math.max(1, Style.spaceReal(1))
+      border.color: root.bar ? root.bar.barForeground : Color.foreground
+    }
 
     SequentialAnimation on scale {
       running: root.svc ? root.svc.applying : false

@@ -133,6 +133,8 @@ def load_theme(theme_dir: Path):
         "green": col("green", "bright_green") or accent,
         "yellow": col("yellow", "bright_yellow") or accent,
         "magenta": col("magenta", "bright_magenta") or accent,
+        "blue": col("blue", "bright_blue") or accent,
+        "cyan": col("cyan", "bright_cyan") or accent,
     }, None
 
 
@@ -167,7 +169,7 @@ def build_palette(t):
         "on_red": on_color(t["red"], [t["background"], t["foreground"]])[0],
         "on_green": on_color(t["green"], [t["background"], t["foreground"]])[0],
         "on_yellow": on_color(t["yellow"], [t["background"], t["foreground"]])[0],
-        "magenta": t["magenta"],
+        "magenta": t["magenta"], "blue": t["blue"], "cyan": t["cyan"],
     }
 
 
@@ -597,6 +599,7 @@ def main():
             "accent": p["accent"], "on_accent": p["on_accent"],
             "separation": p["separation"], "muted": p["muted"],
             "red": p["red"], "green": p["green"], "yellow": p["yellow"],
+            "blue": p["blue"], "cyan": p["cyan"], "magenta": p["magenta"],
         },
         "files": {
             "gtk4": {"path": str(GTK4_CSS), "status": s4},

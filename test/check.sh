@@ -65,6 +65,8 @@ assert "dark: state.json is valid json with schemaVersion 1" \
 assert "dark: state records mode dark" "$([ "$(jqs .mode)" = dark ]; echo $?)"
 assert "dark: state records theme name from dir" "$([ "$(jqs .theme)" = accord-dark ]; echo $?)"
 assert "dark: state on_accent matches css" "$([ "$(jqs .palette.on_accent)" = '#e0e0e0' ]; echo $?)"
+assert "dark: state palette carries the six wheel colors (bar icon input)" \
+  "$(jq -e '.palette | .red and .green and .yellow and .blue and .cyan and .magenta' "$state" >/dev/null; echo $?)"
 assert "dark: state separation is 139" "$([ "$(jqs .palette.separation)" = 139 ]; echo $?)"
 assert "dark: gsettings skipped under ACCORD_NO_GSETTINGS" \
   "$([ "$(jqs .gsettings.applied)" = false ]; echo $?)"
