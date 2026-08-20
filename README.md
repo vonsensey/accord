@@ -34,9 +34,10 @@ whole desktop with it:
 - A **bar widget**: a dot wearing your current accent — read back from what
   was actually written, so the dot itself is proof the bridge ran. Click for
   the panel, right-click to re-apply.
-- A **panel**: a live preview window painted from the exact palette on disk,
-  swatches with hex values, and a list of every file and setting Accord
-  touched, including which app daemons were restarted and which are pending.
+- A **panel with a fitting room**: every installed theme as a card painted
+  from its real palette, a mock app window that previews the selected theme
+  before anything touches the system, and below it the exact palette on
+  disk plus every file and setting Accord touched.
 
 ## The craft bits
 
@@ -71,6 +72,25 @@ Then add the **Accord** widget to your bar (Omarchy settings → Bar) if you
 want the accent dot; the service themes your apps either way. Settings:
 auto-apply on theme switch (On/Off) and restart of background GTK apps
 (On/Off).
+
+## The fitting room
+
+Click the dot (or bind `omarchy-shell shell toggle io.github.vonsensey.accord`)
+and the panel opens on a browsable rail of every theme you have installed —
+stock and user themes alike, each card painted from its own palette, light
+themes visibly light. Arrow keys move; the mock window previews what your
+apps will look like in the selected theme *without touching anything*.
+
+- **Space** tries it on for real: the full Omarchy theme switch plus the app
+  bridge, so your whole desktop — shell, terminal, and every GTK/Qt app —
+  wears the theme while the panel stays open.
+- **Enter** keeps what you're wearing and closes.
+- **Esc** snaps everything back to the theme you opened with and closes.
+  Browse five themes, hate them all, press Esc — you're home.
+
+The built-in switcher commits immediately; the fitting room lets you change
+your mind. That is the same promise as the rest of Accord: nothing it does
+is ever more than one keypress from undone.
 
 ## Remove
 
@@ -127,13 +147,15 @@ and revert.
 bash test/check.sh
 ```
 
-73 plain-bash assertions: palette mapping for dark and light fixtures,
+82 plain-bash assertions: palette mapping for dark and light fixtures,
 on-accent contrast across every stock theme, marker-block preservation of
 pre-existing user css, byte-identical revert (including symlinked and
 non-UTF-8 files, and edits made after the merge), idempotent reruns,
 self-healing of a truncated managed block, hermetic gsettings and
 app-restart coverage via PATH shims, and graceful behavior on missing or
-malformed theme input (exit 3, with the reason recorded in state.json).
+malformed theme input (exit 3, with the reason recorded in state.json),
+and the fitting room's theme catalog (all 22 stock themes with full card
+palettes, user-theme merging, broken themes skipped).
 
 The generator is fully driveable without the shell for testing:
 `ACCORD_THEME_DIR`, `ACCORD_GTK4_CSS`, `ACCORD_GTK3_CSS`,
