@@ -141,18 +141,20 @@ assert "revert: state.json removed" "$([ ! -e "$state" ]; echo $?)"
 
 # ------------------------------------------- run 6: missing/broken theme input
 run_apply "$WORK/does-not-exist"
-assert "missing theme dir: exits 0" $?
+assert "missing theme dir: exits 3 (nothing applied)" "$([ $? = 3 ]; echo $?)"
 mkdir -p "$WORK/badtheme"
 printf 'mode = [broken\n' > "$WORK/badtheme/colors.toml"
 before_count=$(find "$WORK" -name 'gtk.css' | wc -l)
 run_apply "$WORK/badtheme"
-assert "malformed toml: exits 0" $?
+assert "malformed toml: exits 3" "$([ $? = 3 ]; echo $?)"
 assert "malformed toml: writes nothing new" \
   "$([ "$(find "$WORK" -name 'gtk.css' | wc -l)" = "$before_count" ]; echo $?)"
 mkdir -p "$WORK/incomplete"
 printf 'mode = "dark"\naccent = "#333333"\n' > "$WORK/incomplete/colors.toml"
 run_apply "$WORK/incomplete"
-assert "theme missing background/foreground: exits 0, no crash" $?
+assert "theme missing background/foreground: exits 3, no crash" "$([ $? = 3 ]; echo $?)"
+assert "failed apply leaves lastError in state for the panel" \
+  "$(jq -e '.lastError | length > 0' "$state" >/dev/null; echo $?)"
 
 # ------------------------------- run 7: every stock theme produces sane output
 STOCK=/usr/share/omarchy/themes
@@ -174,6 +176,190 @@ if [ -d "$STOCK" ]; then
 else
   echo "skip - no stock themes dir on this machine"
 fi
+
+
+# ---------------------------------------- run 8: symlinked gtk.css (dotfiles)
+DOT="$WORK/dotfiles"; LNK="$WORK/link/gtk-4.0"
+mkdir -p "$DOT" "$LNK"
+printf 'window { font-weight: bold; } /* dotfiles */\n' > "$DOT/gtk.css"
+cp "$DOT/gtk.css" "$WORK/dotfiles-original.css"
+ln -s "$DOT/gtk.css" "$LNK/gtk.css"
+ACCORD_THEME_DIR="$HERE/fixtures/accord-dark" \
+ACCORD_GTK4_CSS="$LNK/gtk.css" \
+ACCORD_GTK3_CSS="$WORK/link/gtk3.css" \
+ACCORD_STATE_DIR="$WORK/state" \
+ACCORD_NO_GSETTINGS=1 "$APPLY" --no-restart >/dev/null
+assert "symlink: apply keeps the symlink intact" "$([ -L "$LNK/gtk.css" ]; echo $?)"
+assert "symlink: backup created next to the TARGET, not the link" \
+  "$([ -f "$DOT/gtk.css.accord-backup" ]; echo $?)"
+ACCORD_THEME_DIR="$HERE/fixtures/accord-dark" \
+ACCORD_GTK4_CSS="$LNK/gtk.css" \
+ACCORD_GTK3_CSS="$WORK/link/gtk3.css" \
+ACCORD_STATE_DIR="$WORK/state" \
+ACCORD_NO_GSETTINGS=1 "$APPLY" --revert >/dev/null
+assert "symlink: revert keeps the symlink" "$([ -L "$LNK/gtk.css" ]; echo $?)"
+assert "symlink: target restored byte-identical" \
+  "$(cmp -s "$DOT/gtk.css" "$WORK/dotfiles-original.css"; echo $?)"
+assert "symlink: backup consumed" "$([ ! -e "$DOT/gtk.css.accord-backup" ]; echo $?)"
+
+# --------------------------- run 9: truncated marker block self-heals to one
+TR="$WORK/trunc"; mkdir -p "$TR"
+printf '%s\n@define-color window_bg_color #dead00;\n' \
+  "/* >>> accord:managed >>> generated from the active Omarchy theme; edits inside this block are overwritten */" > "$TR/gtk.css"
+ACCORD_THEME_DIR="$HERE/fixtures/accord-dark" \
+ACCORD_GTK4_CSS="$TR/gtk.css" \
+ACCORD_GTK3_CSS="$TR/gtk3.css" \
+ACCORD_STATE_DIR="$WORK/state" \
+ACCORD_NO_GSETTINGS=1 "$APPLY" --no-restart >/dev/null
+assert "truncated marker: exactly one managed block after apply" \
+  "$([ "$(grep -c '>>> accord:managed' "$TR/gtk.css")" = 1 ]; echo $?)"
+assert "truncated marker: stale color gone, no duplicate define wins" \
+  "$([ "$(grep -c 'window_bg_color' "$TR/gtk.css")" = 1 ] && grep -q '#202020' "$TR/gtk.css"; echo $?)"
+
+# ------------------- run 10: revert preserves user edits made after the merge
+PM="$WORK/postmerge"; mkdir -p "$PM"
+printf 'window { font-size: 11px; }\n' > "$PM/gtk.css"
+ACCORD_THEME_DIR="$HERE/fixtures/accord-dark" \
+ACCORD_GTK4_CSS="$PM/gtk.css" ACCORD_GTK3_CSS="$PM/gtk3.css" \
+ACCORD_STATE_DIR="$WORK/state" ACCORD_NO_GSETTINGS=1 "$APPLY" --no-restart >/dev/null
+printf 'label { color: red; } /* added after merge */\n' >> "$PM/gtk.css"
+ACCORD_THEME_DIR="$HERE/fixtures/accord-dark" \
+ACCORD_GTK4_CSS="$PM/gtk.css" ACCORD_GTK3_CSS="$PM/gtk3.css" \
+ACCORD_STATE_DIR="$WORK/state" ACCORD_NO_GSETTINGS=1 "$APPLY" --revert >/dev/null
+assert "post-merge edits: revert keeps BOTH user rules, drops the block" \
+  "$(grep -q 'font-size: 11px' "$PM/gtk.css" && grep -q 'added after merge' "$PM/gtk.css" \
+     && ! grep -q 'accord:managed' "$PM/gtk.css"; echo $?)"
+assert "post-merge edits: backup kept as reference" \
+  "$([ -f "$PM/gtk.css.accord-backup" ]; echo $?)"
+
+# ------------------------------- run 11: non-UTF-8 user css round-trips exact
+NU="$WORK/nonutf8"; mkdir -p "$NU"
+printf 'window { } /* caf\xe9 latin-1 */\n' > "$NU/gtk.css"
+cp "$NU/gtk.css" "$WORK/nonutf8-original.css"
+ACCORD_THEME_DIR="$HERE/fixtures/accord-dark" \
+ACCORD_GTK4_CSS="$NU/gtk.css" ACCORD_GTK3_CSS="$NU/gtk3.css" \
+ACCORD_STATE_DIR="$WORK/state" ACCORD_NO_GSETTINGS=1 "$APPLY" --no-restart >/dev/null
+assert "non-utf8 css: apply succeeds and keeps the raw bytes" \
+  "$(grep -q 'accord:managed' "$NU/gtk.css" && grep -qa 'latin-1' "$NU/gtk.css"; echo $?)"
+ACCORD_THEME_DIR="$HERE/fixtures/accord-dark" \
+ACCORD_GTK4_CSS="$NU/gtk.css" ACCORD_GTK3_CSS="$NU/gtk3.css" \
+ACCORD_STATE_DIR="$WORK/state" ACCORD_NO_GSETTINGS=1 "$APPLY" --revert >/dev/null
+assert "non-utf8 css: revert restores byte-identical" \
+  "$(cmp -s "$NU/gtk.css" "$WORK/nonutf8-original.css"; echo $?)"
+
+# ----------------- run 12: gsettings capture/restore via fake shim (hermetic)
+FAKEBIN="$WORK/fakebin"; mkdir -p "$FAKEBIN"
+GSTATE="$WORK/fake-gsettings-state"
+printf "color-scheme prefer-dark\ngtk-theme MyUserTheme\n" > "$GSTATE"
+cat > "$FAKEBIN/gsettings" <<FAKE
+#!/usr/bin/env bash
+STATE="$GSTATE"
+case "\$1" in
+  get) awk -v k="\$3" '\$1==k {print "'"'"'" \$2 "'"'"'"}' "\$STATE" ;;
+  set) grep -v "^\$3 " "\$STATE" > "\$STATE.n"; echo "\$3 \$4" >> "\$STATE.n"; mv "\$STATE.n" "\$STATE" ;;
+esac
+FAKE
+chmod +x "$FAKEBIN/gsettings"
+GS="$WORK/gsettings-run"; mkdir -p "$GS"
+PATH="$FAKEBIN:$PATH" \
+ACCORD_THEME_DIR="$HERE/fixtures/accord-dark" \
+ACCORD_GTK4_CSS="$GS/gtk.css" ACCORD_GTK3_CSS="$GS/gtk3.css" \
+ACCORD_STATE_DIR="$GS/state" "$APPLY" --no-restart >/dev/null
+assert "gsettings: originals captured on first apply" \
+  "$(jq -e '.gsettings.saved["gtk-theme"] == "MyUserTheme"' "$GS/state/state.json" >/dev/null; echo $?)"
+assert "gsettings: dark theme applied Adwaita-dark to live settings" \
+  "$(grep -q 'gtk-theme Adwaita-dark' "$GSTATE"; echo $?)"
+PATH="$FAKEBIN:$PATH" \
+ACCORD_THEME_DIR="$HERE/fixtures/accord-light" \
+ACCORD_GTK4_CSS="$GS/gtk.css" ACCORD_GTK3_CSS="$GS/gtk3.css" \
+ACCORD_STATE_DIR="$GS/state" "$APPLY" --no-restart >/dev/null
+assert "gsettings: light theme flips to prefer-light + Adwaita" \
+  "$(grep -q 'color-scheme prefer-light' "$GSTATE" && grep -q 'gtk-theme Adwaita$' "$GSTATE"; echo $?)"
+assert "gsettings: originals NOT overwritten on second apply" \
+  "$(jq -e '.gsettings.saved["gtk-theme"] == "MyUserTheme"' "$GS/state/state.json" >/dev/null; echo $?)"
+PATH="$FAKEBIN:$PATH" \
+ACCORD_THEME_DIR="$HERE/fixtures/accord-light" \
+ACCORD_GTK4_CSS="$GS/gtk.css" ACCORD_GTK3_CSS="$GS/gtk3.css" \
+ACCORD_STATE_DIR="$GS/state" "$APPLY" --revert >/dev/null
+assert "gsettings: revert restores the user's original values" \
+  "$(grep -q 'gtk-theme MyUserTheme' "$GSTATE" && grep -q 'color-scheme prefer-dark' "$GSTATE"; echo $?)"
+
+# ------------------ run 13: poisoned None originals recover on the next apply
+PO="$WORK/poison"; mkdir -p "$PO/state"
+printf '{"schemaVersion":1,"gsettings":{"saved":{"color-scheme":null,"gtk-theme":null}}}\n' > "$PO/state/state.json"
+printf "color-scheme prefer-dark\ngtk-theme RealTheme\n" > "$GSTATE"
+PATH="$FAKEBIN:$PATH" \
+ACCORD_THEME_DIR="$HERE/fixtures/accord-dark" \
+ACCORD_GTK4_CSS="$PO/gtk.css" ACCORD_GTK3_CSS="$PO/gtk3.css" \
+ACCORD_STATE_DIR="$PO/state" "$APPLY" --no-restart >/dev/null
+assert "poisoned Nones: re-captured real originals instead of keeping nulls" \
+  "$(jq -e '.gsettings.saved["gtk-theme"] == "RealTheme"' "$PO/state/state.json" >/dev/null; echo $?)"
+
+# --------------------- run 14: restart pass via fake hyprctl/pgrep (hermetic)
+sleep 300 & VICTIM=$!
+sleep 300 & WINDOWED=$!
+cat > "$FAKEBIN/hyprctl" <<FAKE
+#!/usr/bin/env bash
+echo '[{"pid": $WINDOWED, "title": "fake window"}]'
+FAKE
+cat > "$FAKEBIN/pgrep" <<FAKE
+#!/usr/bin/env bash
+name="\${@: -1}"
+[ "\$name" = nautilus ] && { echo $VICTIM; exit 0; }
+[ "\$name" = geary ] && { echo $WINDOWED; exit 0; }
+exit 1
+FAKE
+chmod +x "$FAKEBIN/hyprctl" "$FAKEBIN/pgrep"
+RS="$WORK/restart-run"; mkdir -p "$RS"
+PATH="$FAKEBIN:$PATH" \
+ACCORD_THEME_DIR="$HERE/fixtures/accord-dark" \
+ACCORD_GTK4_CSS="$RS/gtk.css" ACCORD_GTK3_CSS="$RS/gtk3.css" \
+ACCORD_STATE_DIR="$RS/state" ACCORD_NO_GSETTINGS=1 "$APPLY" >/dev/null
+sleep 0.3
+assert "restart: windowless allowlisted app was SIGTERMed" \
+  "$(kill -0 $VICTIM 2>/dev/null; [ $? != 0 ]; echo $?)"
+assert "restart: windowed app spared and reported pending" \
+  "$(kill -0 $WINDOWED 2>/dev/null && jq -e '.restarts.pending == ["geary"]' "$RS/state/state.json" >/dev/null; echo $?)"
+assert "restart: windowless app reported restarted" \
+  "$(jq -e '.restarts.restarted == ["nautilus"]' "$RS/state/state.json" >/dev/null; echo $?)"
+kill $WINDOWED 2>/dev/null
+# hyprctl broken -> nothing killed, pending lists only RUNNING apps
+sleep 300 & VICTIM2=$!
+cat > "$FAKEBIN/hyprctl" <<'FAKE'
+#!/usr/bin/env bash
+exit 1
+FAKE
+cat > "$FAKEBIN/pgrep" <<FAKE
+#!/usr/bin/env bash
+name="\${@: -1}"
+[ "\$name" = nautilus ] && { echo $VICTIM2; exit 0; }
+exit 1
+FAKE
+chmod +x "$FAKEBIN/hyprctl" "$FAKEBIN/pgrep"
+rm -f "$RS/gtk.css"
+PATH="$FAKEBIN:$PATH" \
+ACCORD_THEME_DIR="$HERE/fixtures/accord-dark" \
+ACCORD_GTK4_CSS="$RS/gtk.css" ACCORD_GTK3_CSS="$RS/gtk3.css" \
+ACCORD_STATE_DIR="$RS/state" ACCORD_NO_GSETTINGS=1 "$APPLY" >/dev/null
+assert "restart: hyprctl broken -> nothing killed, pending only running apps" \
+  "$(kill -0 $VICTIM2 2>/dev/null && jq -e '.restarts.pending == ["nautilus"] and .restarts.restarted == []' "$RS/state/state.json" >/dev/null; echo $?)"
+kill $VICTIM2 2>/dev/null
+
+# ------------------------- run 15: XDG_STATE_HOME honored when no override set
+XS="$WORK/xdg-state"
+ACCORD_THEME_DIR="$HERE/fixtures/accord-dark" \
+ACCORD_GTK4_CSS="$WORK/xdg-gtk4.css" ACCORD_GTK3_CSS="$WORK/xdg-gtk3.css" \
+XDG_STATE_HOME="$XS" ACCORD_NO_GSETTINGS=1 \
+  env -u ACCORD_STATE_DIR "$APPLY" --no-restart >/dev/null
+assert "XDG_STATE_HOME: state lands where the shell service watches" \
+  "$(jq -e '.schemaVersion == 1' "$XS/omarchy/accord/state.json" >/dev/null; echo $?)"
+
+# ------------------------------ run 16: define-set completeness is pinned
+run_apply "$HERE/fixtures/accord-dark" >/dev/null
+assert "gtk4 css defines exactly 47 colors" \
+  "$([ "$(grep -c '@define-color' "$css4")" = 47 ]; echo $?)"
+assert "gtk3 css defines exactly 22 colors" \
+  "$([ "$(grep -c '@define-color' "$css3")" = 22 ]; echo $?)"
 
 echo
 if [ "$FAILED" = "0" ]; then

@@ -63,9 +63,7 @@ The resident service is a QML timer polling one `readlink` every 3 s.
 ## Install
 
 ```sh
-git clone https://github.com/vonsensey/accord \
-  ~/.config/omarchy/plugins/io.github.vonsensey.accord \
-  && omarchy plugin enable io.github.vonsensey.accord
+omarchy plugin add https://github.com/vonsensey/accord --enable
 ```
 
 Then add the **Accord** widget to your bar (Omarchy settings → Bar) if you
@@ -84,7 +82,11 @@ auto-apply on theme switch (On/Off) and restart of background GTK apps
 
 `--revert` restores your original `gtk.css` files (byte-identical, from the
 one-time backups), removes what Accord created, and restores the
-`color-scheme`/`gtk-theme` values it found on first run.
+`color-scheme`/`gtk-theme` values it found on first run. If you edited a
+file after Accord merged into it, revert keeps your newer content (minus
+Accord's block) and leaves the backup in place for reference. Symlinked
+`gtk.css` files (dotfiles setups) keep their symlink through both apply
+and revert.
 
 ## What it writes, and what it does not
 
@@ -93,9 +95,12 @@ one-time backups), removes what Accord created, and restores the
     replaceable block; pre-existing content is backed up once and preserved.
   - Two GNOME settings: `org.gnome.desktop.interface color-scheme` and
     `gtk-theme` — originals saved to state for revert.
-  - `~/.local/state/omarchy/accord/state.json` — what was applied, for the
-    widget and panel.
-- **Reads only** the active theme's `colors.toml`. Nothing else.
+  - `~/.local/state/omarchy/accord/state.json` (honoring `XDG_STATE_HOME`) —
+    what was applied, for the widget and panel.
+- **Reads:** the active theme's `colors.toml`; the two managed `gtk.css`
+  files (to preserve your rules); its own state; the current values of the
+  two gsettings keys (saved for revert); and the Hyprland window list +
+  process names that the never-kill-a-window guard needs.
 - **No network. Ever.** No elevation, no daemons, no writes anywhere else.
 - The restart allowlist is exactly: nautilus, geary, gnome-calendar,
   gnome-text-editor, loupe, evince, snapshot — SIGTERM, windowless only.
@@ -118,7 +123,15 @@ one-time backups), removes what Accord created, and restores the
 bash test/check.sh
 ```
 
-48 plain-bash assertions: palette mapping for dark and light fixtures,
+73 plain-bash assertions: palette mapping for dark and light fixtures,
 on-accent contrast across every stock theme, marker-block preservation of
-pre-existing user css, byte-identical revert, idempotent reruns, and
-graceful behavior on missing or malformed theme input.
+pre-existing user css, byte-identical revert (including symlinked and
+non-UTF-8 files, and edits made after the merge), idempotent reruns,
+self-healing of a truncated managed block, hermetic gsettings and
+app-restart coverage via PATH shims, and graceful behavior on missing or
+malformed theme input (exit 3, with the reason recorded in state.json).
+
+The generator is fully driveable without the shell for testing:
+`ACCORD_THEME_DIR`, `ACCORD_GTK4_CSS`, `ACCORD_GTK3_CSS`,
+`ACCORD_STATE_DIR`, and `ACCORD_NO_GSETTINGS=1` override every path it
+touches, exactly as `test/check.sh` uses them.

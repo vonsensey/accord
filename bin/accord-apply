@@ -6,13 +6,15 @@ Reads the active theme's colors.toml and writes @define-color overrides into
 lever libadwaita honors — plus the GNOME color-scheme/gtk-theme settings that
 Omarchy's installer sets once and never updates on theme switch.
 
-Read-only toward the theme. Writes exactly: the two css files (a marked,
-replaceable block; pre-existing user css is backed up once and preserved),
-two gsettings keys (originals saved for revert), and a state.json for the
-shell plugin. No network, no elevation.
+Writes exactly: the two css files (a marked, replaceable block; pre-existing
+user css is backed up once and preserved), two gsettings keys (originals saved
+for revert), and state.json for the shell plugin. No network, no elevation.
+
+Exit codes: 0 = applied or reverted; 3 = nothing applied (missing or broken
+theme input; the reason lands in state.json's lastError and on stderr).
 
 Shebang is /usr/bin/python3 on purpose: `python3` on PATH may be a mise shim
-without the system's tomllib/gi environment.
+without the system's tomllib environment.
 """
 
 import argparse
@@ -34,16 +36,21 @@ def _env_path(name: str, default: Path) -> Path:
     return Path(v) if v else default
 
 
+def _state_default() -> Path:
+    # Honor XDG_STATE_HOME like Service.qml and the sibling plugins do.
+    base = os.environ.get("XDG_STATE_HOME")
+    return (Path(base) if base else HOME / ".local/state") / "omarchy/accord"
+
+
 THEME_DIR = _env_path("ACCORD_THEME_DIR", HOME / ".local/state/omarchy/current/theme")
 GTK4_CSS = _env_path("ACCORD_GTK4_CSS", HOME / ".config/gtk-4.0/gtk.css")
 GTK3_CSS = _env_path("ACCORD_GTK3_CSS", HOME / ".config/gtk-3.0/gtk.css")
-STATE_DIR = _env_path("ACCORD_STATE_DIR", HOME / ".local/state/omarchy/accord")
+STATE_DIR = _env_path("ACCORD_STATE_DIR", _state_default())
 STATE_FILE = STATE_DIR / "state.json"
 NO_GSETTINGS = os.environ.get("ACCORD_NO_GSETTINGS") == "1"
 
 BEGIN = "/* >>> accord:managed >>> generated from the active Omarchy theme; edits inside this block are overwritten */"
 END = "/* <<< accord:managed <<< */"
-BLOCK_RE = re.compile(re.escape(BEGIN) + r".*?" + re.escape(END) + r"\n?", re.DOTALL)
 
 # GTK4 apps read the user stylesheet only at process startup, so windowless
 # daemons keep painting the old palette until restarted. Only these well-known
@@ -52,6 +59,21 @@ RESTART_ALLOWLIST = ["nautilus", "geary", "gnome-calendar", "gnome-text-editor",
                      "loupe", "evince", "snapshot"]
 
 HEX_RE = re.compile(r"^#[0-9a-fA-F]{6}$")
+
+# css files are read/written with surrogateescape so a user file with stray
+# non-UTF-8 bytes round-trips byte-exact instead of crashing the apply.
+ENC = {"encoding": "utf-8", "errors": "surrogateescape"}
+
+
+def read_file(path: Path) -> str:
+    return path.read_text(**ENC)
+
+
+def atomic_write(path: Path, text: str):
+    # tmp sibling + replace: a kill mid-write can never truncate the live file.
+    tmp = path.with_name(path.name + ".accord-tmp")
+    tmp.write_text(text, **ENC)
+    tmp.replace(path)
 
 
 def parse_hex(value):
@@ -80,8 +102,7 @@ def load_theme(theme_dir: Path):
         with open(toml_path, "rb") as f:
             data = tomllib.load(f)
     except (OSError, tomllib.TOMLDecodeError) as e:
-        print(f"accord: cannot read {toml_path}: {e}", file=sys.stderr)
-        return None
+        return None, f"cannot read {toml_path}: {e}"
 
     def col(*keys):
         for k in keys:
@@ -94,9 +115,7 @@ def load_theme(theme_dir: Path):
     foreground = col("foreground")
     accent = col("accent", "blue")
     if not (background and foreground and accent):
-        print(f"accord: {toml_path} lacks background/foreground/accent; nothing applied",
-              file=sys.stderr)
-        return None
+        return None, f"{toml_path} lacks background/foreground/accent"
 
     return {
         "mode": "light" if data.get("mode") == "light" else "dark",
@@ -112,7 +131,7 @@ def load_theme(theme_dir: Path):
         "green": col("green", "bright_green") or accent,
         "yellow": col("yellow", "bright_yellow") or accent,
         "magenta": col("magenta", "bright_magenta") or accent,
-    }
+    }, None
 
 
 def build_palette(t):
@@ -213,20 +232,54 @@ def render_block(defines: dict) -> str:
     return "\n".join(lines) + "\n"
 
 
+def find_block_span(text: str):
+    """Span of the managed region, tolerant of a truncated END: a file whose
+    write was cut off after BEGIN would otherwise grow a second block, and GTK
+    resolves duplicate @define-color names last-wins — a silent stale palette.
+    From BEGIN to END inclusive when END follows; to end-of-file when it
+    doesn't (the truncation ate our block, and whatever followed it)."""
+    b = text.find(BEGIN)
+    if b < 0:
+        return None
+    e = text.find(END, b)
+    if e < 0:
+        return b, len(text)
+    e += len(END)
+    if e < len(text) and text[e] == "\n":
+        e += 1
+    return b, e
+
+
+def strip_block(text: str) -> str:
+    span = find_block_span(text)
+    if span is None:
+        return text
+    remainder = text[:span[0]] + text[span[1]:]
+    # write_managed joins block and user content with one extra newline.
+    if remainder.startswith("\n"):
+        remainder = remainder[1:]
+    return remainder
+
+
 def write_managed(path: Path, block: str) -> str:
     """Install `block` as the accord-managed region of `path`.
     Returns created | updated | unchanged | merged."""
+    # Operate on the real file so a symlinked gtk.css (dotfiles setups) keeps
+    # its link and the backup sits next to the target, not the link.
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path = path.resolve() if path.exists() else path.parent.resolve() / path.name
+
     if not path.exists():
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(block, encoding="utf-8")
+        atomic_write(path, block)
         return "created"
 
-    text = path.read_text(encoding="utf-8")
-    if BEGIN in text and END in text:
-        new = BLOCK_RE.sub(lambda _: block, text, count=1)
+    text = read_file(path)
+    span = find_block_span(text)
+    if span is not None:
+        new = text[:span[0]] + block + text[span[1]:]
         if new == text:
             return "unchanged"
-        path.write_text(new, encoding="utf-8")
+        atomic_write(path, new)
         return "updated"
 
     # Someone else's css: keep every byte, once, in a backup we can restore,
@@ -234,25 +287,38 @@ def write_managed(path: Path, block: str) -> str:
     backup = path.with_name(path.name + ".accord-backup")
     if not backup.exists():
         shutil.copy2(path, backup)
-    path.write_text(block + "\n" + text, encoding="utf-8")
+    atomic_write(path, block + "\n" + text)
     return "merged"
 
 
 def revert_file(path: Path):
+    if path.exists():
+        path = path.resolve()
     backup = path.with_name(path.name + ".accord-backup")
+
     if backup.exists():
-        shutil.move(backup, path)
+        backup_text = read_file(backup)
+        if path.exists():
+            remainder = strip_block(read_file(path))
+            if remainder != backup_text:
+                # The user edited the file after we merged: keep their newer
+                # content (minus our block) and leave the backup as reference.
+                atomic_write(path, remainder)
+                return "stripped-kept-backup"
+        atomic_write(path, backup_text)
+        backup.unlink()
         return "restored-backup"
+
     if not path.exists():
         return "absent"
-    text = path.read_text(encoding="utf-8")
+    text = read_file(path)
     if BEGIN not in text:
         return "untouched"
-    remainder = BLOCK_RE.sub("", text, count=1)
+    remainder = strip_block(text)
     if remainder.strip() == "":
         path.unlink()
         return "removed"
-    path.write_text(remainder.lstrip("\n"), encoding="utf-8")
+    atomic_write(path, remainder)
     return "stripped"
 
 
@@ -283,36 +349,70 @@ def load_state():
         return {}
 
 
-def windowed_pids() -> set | None:
+def save_state(state: dict):
+    try:
+        STATE_DIR.mkdir(parents=True, exist_ok=True)
+        tmp = STATE_FILE.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(state, indent=1) + "\n", encoding="utf-8")
+        tmp.replace(STATE_FILE)
+        return True
+    except OSError as e:
+        print(f"accord: cannot write {STATE_FILE}: {e}", file=sys.stderr)
+        return False
+
+
+def usable_saved(saved) -> bool:
+    # A dict of Nones means the capture ran while gsettings was unreachable;
+    # treating it as settled would silently break --revert forever.
+    return isinstance(saved, dict) and any(saved.values())
+
+
+def windowed_pids():
     """PIDs owning a visible Hyprland window, or None if that cannot be known."""
     try:
         out = subprocess.run(["hyprctl", "clients", "-j"],
                              capture_output=True, text=True, timeout=10)
         if out.returncode != 0:
             return None
-        return {c["pid"] for c in json.loads(out.stdout) if c.get("pid")}
-    except (OSError, subprocess.TimeoutExpired, json.JSONDecodeError, TypeError):
+        return {c["pid"] for c in json.loads(out.stdout)
+                if isinstance(c, dict) and c.get("pid")}
+    except (OSError, subprocess.TimeoutExpired, json.JSONDecodeError,
+            TypeError, AttributeError, KeyError):
         return None
+
+
+def running_pids(name: str) -> list[int]:
+    # Scoped to this user: without -U, pgrep would report (and this tool would
+    # claim to have restarted) other users' processes it cannot signal.
+    try:
+        out = subprocess.run(["pgrep", "-x", "-U", str(os.getuid()), name],
+                             capture_output=True, text=True, timeout=10)
+    except (OSError, subprocess.TimeoutExpired):
+        return []
+    if out.returncode != 0:
+        return []
+    return [int(p) for p in out.stdout.split() if p.isdigit()]
 
 
 def restart_apps():
     """SIGTERM allowlisted GTK daemons so they relaunch with the new palette.
     An app with an open window is never killed — it repaints on next launch."""
+    candidates = {name: pids for name in RESTART_ALLOWLIST
+                  if (pids := running_pids(name))}
+    if not candidates:
+        return [], []
+
+    # Snapshot windows AFTER collecting pids, immediately before the kills,
+    # to shrink the race where an app opens its first window mid-scan. A pid
+    # reused in the remaining milliseconds is the ceiling of this approach.
     visible = windowed_pids()
     if visible is None:
         # Can't tell windowed from windowless: restarting blind could close
-        # something the user is looking at. Do nothing and say so.
-        return [], list(RESTART_ALLOWLIST)
+        # something the user is looking at. Report only apps actually running.
+        return [], sorted(candidates)
+
     restarted, pending = [], []
-    for name in RESTART_ALLOWLIST:
-        try:
-            out = subprocess.run(["pgrep", "-x", name],
-                                 capture_output=True, text=True, timeout=10)
-        except (OSError, subprocess.TimeoutExpired):
-            continue
-        if out.returncode != 0:
-            continue
-        pids = [int(p) for p in out.stdout.split() if p.isdigit()]
+    for name, pids in candidates.items():
         if any(p in visible for p in pids):
             pending.append(name)
             continue
@@ -321,9 +421,31 @@ def restart_apps():
                 os.kill(p, 15)
             except OSError:
                 pass
-        if pids:
-            restarted.append(name)
+        restarted.append(name)
     return restarted, pending
+
+
+def do_revert() -> int:
+    state = load_state()
+    r4 = revert_file(GTK4_CSS)
+    r3 = revert_file(GTK3_CSS)
+    saved = state.get("gsettings", {}).get("saved") or {}
+    restored, failed = [], []
+    if not NO_GSETTINGS:
+        for key, value in saved.items():
+            if not value:
+                continue
+            (restored if gsettings_set(key, value) else failed).append(key)
+    if failed:
+        # Keep state.json so the saved originals survive for a retry.
+        print(f"accord: reverted css (gtk4: {r4}, gtk3: {r3}) but could not "
+              f"restore gsettings: {', '.join(failed)} - state kept for retry",
+              file=sys.stderr)
+        return 0
+    STATE_FILE.unlink(missing_ok=True)
+    gs = ", ".join(restored) if restored else "nothing to restore"
+    print(f"accord: reverted (gtk4: {r4}, gtk3: {r3}, gsettings: {gs})")
+    return 0
 
 
 def main():
@@ -335,36 +457,41 @@ def main():
     args = ap.parse_args()
 
     if args.revert:
-        state = load_state()
-        r4 = revert_file(GTK4_CSS)
-        r3 = revert_file(GTK3_CSS)
-        saved = state.get("gsettings", {}).get("saved") or {}
-        if not NO_GSETTINGS:
-            for key, value in saved.items():
-                if value:
-                    gsettings_set(key, value)
-        STATE_FILE.unlink(missing_ok=True)
-        print(f"accord: reverted (gtk4: {r4}, gtk3: {r3}, "
-              f"gsettings: {'restored' if saved else 'untouched'})")
-        return 0
+        return do_revert()
 
-    theme = load_theme(THEME_DIR)
+    theme, err = load_theme(THEME_DIR)
     if theme is None:
-        return 0  # stay quiet and harmless on broken input; stderr has the why
+        print(f"accord: {err}; nothing applied", file=sys.stderr)
+        # Leave a durable trace so the panel can say WHY instead of showing
+        # yesterday's palette as if it were current.
+        prev = load_state() or {"schemaVersion": 1}
+        prev["lastError"] = err
+        prev["lastErrorAt"] = int(time.time())
+        save_state(prev)
+        return 3
 
     p = build_palette(theme)
     theme_name = re.sub(r"[^A-Za-z0-9 _.-]", "-", THEME_DIR.resolve().name)
 
-    s4 = write_managed(GTK4_CSS, render_block(gtk4_defines(p)))
-    s3 = write_managed(GTK3_CSS, render_block(gtk3_defines(p)))
-
     prev = load_state()
     gsettings = {"applied": False,
                  "saved": prev.get("gsettings", {}).get("saved")}
+    if not NO_GSETTINGS and not usable_saved(gsettings["saved"]):
+        captured = {"color-scheme": gsettings_get("color-scheme"),
+                    "gtk-theme": gsettings_get("gtk-theme")}
+        # Persist only a real capture; a failed one retries on the next run.
+        gsettings["saved"] = captured if usable_saved(captured) else None
+        if gsettings["saved"]:
+            # Save the originals BEFORE the first set: a crash in between must
+            # not make accord's own values the "originals" revert restores.
+            early = dict(prev) if prev else {"schemaVersion": 1}
+            early["gsettings"] = {"applied": False, "saved": gsettings["saved"]}
+            save_state(early)
+
+    s4 = write_managed(GTK4_CSS, render_block(gtk4_defines(p)))
+    s3 = write_managed(GTK3_CSS, render_block(gtk3_defines(p)))
+
     if not NO_GSETTINGS:
-        if gsettings["saved"] is None:
-            gsettings["saved"] = {"color-scheme": gsettings_get("color-scheme"),
-                                  "gtk-theme": gsettings_get("gtk-theme")}
         scheme = "prefer-light" if p["mode"] == "light" else "prefer-dark"
         gtk_theme = "Adwaita" if p["mode"] == "light" else "Adwaita-dark"
         ok1 = gsettings_set("color-scheme", scheme)
@@ -376,7 +503,6 @@ def main():
     if not args.no_restart and s4 in ("created", "updated", "merged"):
         restarted, pending = restart_apps()
 
-    STATE_DIR.mkdir(parents=True, exist_ok=True)
     state = {
         "schemaVersion": 1,
         "generatedAt": int(time.time()),
@@ -398,9 +524,7 @@ def main():
         "gsettings": gsettings,
         "restarts": {"restarted": restarted, "pending": pending},
     }
-    tmp = STATE_FILE.with_suffix(".json.tmp")
-    tmp.write_text(json.dumps(state, indent=1) + "\n", encoding="utf-8")
-    tmp.replace(STATE_FILE)
+    save_state(state)
 
     print(f"accord: {theme_name} ({p['mode']}) → gtk4 {s4}, gtk3 {s3}"
           + (f", restarted {','.join(restarted)}" if restarted else "")

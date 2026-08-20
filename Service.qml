@@ -63,7 +63,15 @@ Item {
   // omarchy-theme-set swaps the current/theme SYMLINK, which a watcher on
   // the resolved file can miss entirely - so poll the identity instead:
   // resolved path + colors.toml mtime, compared as one string.
-  property string themeStamp: ""
+  //
+  // lastAppliedStamp advances only on a SUCCESSFUL apply, so the 3s poll
+  // naturally retries a failed or raced apply; failedStamp caps that retry
+  // at 3 attempts per stamp so broken input cannot become a crash loop.
+  property string lastSeenStamp: ""
+  property string lastAppliedStamp: ""
+  property string failedStamp: ""
+  property int failCount: 0
+  property string pendingStamp: ""
 
   Timer {
     interval: 3000
@@ -91,12 +99,23 @@ Item {
   }
 
   function onProbe(stamp) {
-    if (stamp === "" || stamp === themeStamp) return
-    var first = themeStamp === ""
-    themeStamp = stamp
-    // First probe after (re)load: apply so a fresh enable is themed at once.
-    // Later probes are real theme switches, gated by the autoApply setting.
-    if (first || autoApply) runApply()
+    if (stamp === "") return
+    var first = lastSeenStamp === ""
+    lastSeenStamp = stamp
+    if (applyProcess.running) return
+    if (stamp === lastAppliedStamp) return
+    if (stamp === failedStamp && failCount >= 3) return
+    // autoApply Off means exactly that: mark the stamp handled and wait for
+    // the user. The one exception is a genuinely fresh install (no state
+    // yet), where enabling the plugin IS the request to theme the apps.
+    var freshInstall = state === null
+    if (!autoApply && !(first && freshInstall)) {
+      lastAppliedStamp = stamp
+      return
+    }
+    // The automatic first apply skips app restarts: it can fire before the
+    // bar widget has pushed the user's restartApps setting.
+    applyNow(first)
   }
 
   // ------------------------------------------------------------------ apply
@@ -104,7 +123,22 @@ Item {
     id: applyProcess
     running: false
     command: [root.pluginDir + "/bin/accord-apply"]
-    onExited: root.applying = false
+    // Quickshell's Process never emits exited on a FailedToStart spawn
+    // error, so the applying flag is cleared from running itself.
+    onRunningChanged: if (!running) root.applying = false
+    onExited: function(exitCode, exitStatus) {
+      root.applying = false
+      if (exitCode === 0) {
+        root.lastAppliedStamp = root.pendingStamp
+        root.failedStamp = ""
+        root.failCount = 0
+      } else if (root.failedStamp === root.pendingStamp) {
+        root.failCount++
+      } else {
+        root.failedStamp = root.pendingStamp
+        root.failCount = 1
+      }
+    }
 
     stderr: StdioCollector {
       waitForEnd: true
@@ -115,14 +149,26 @@ Item {
     }
   }
 
-  function runApply() {
+  // A wedged child would otherwise block every future apply forever; the
+  // Process type has no timeout of its own.
+  Timer {
+    interval: 30000
+    running: applyProcess.running
+    onTriggered: applyProcess.signal(9)
+  }
+  Timer {
+    interval: 10000
+    running: probeProcess.running
+    onTriggered: probeProcess.signal(9)
+  }
+
+  function applyNow(firstRun) {
     if (applyProcess.running) return
     var cmd = [root.pluginDir + "/bin/accord-apply"]
-    if (!restartApps) cmd.push("--no-restart")
+    if (!restartApps || firstRun === true) cmd.push("--no-restart")
+    pendingStamp = lastSeenStamp
     applyProcess.command = cmd
     root.applying = true
     applyProcess.running = true
   }
-
-  function applyNow() { runApply() }
 }

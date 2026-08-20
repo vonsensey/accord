@@ -398,6 +398,8 @@ Item {
               rows.push({ label: "Qt 5 / Qt 6", detail: "follows GTK3 via qgtk3 - applies when an app launches" })
               if (root.st.gsettings && root.st.gsettings.applied)
                 rows.push({ label: "color-scheme", detail: root.st.gsettings.color_scheme + "  ·  gtk-theme " + root.st.gsettings.gtk_theme })
+              if (root.st.lastError)
+                rows.push({ label: "last error", detail: String(root.st.lastError) })
               var r = root.st.restarts || {}
               if (r.restarted && r.restarted.length > 0)
                 rows.push({ label: "restarted", detail: r.restarted.join(", ") })
