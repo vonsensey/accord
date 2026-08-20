@@ -46,6 +46,8 @@ THEME_DIR = _env_path("ACCORD_THEME_DIR", HOME / ".local/state/omarchy/current/t
 GTK4_CSS = _env_path("ACCORD_GTK4_CSS", HOME / ".config/gtk-4.0/gtk.css")
 GTK3_CSS = _env_path("ACCORD_GTK3_CSS", HOME / ".config/gtk-3.0/gtk.css")
 STATE_DIR = _env_path("ACCORD_STATE_DIR", _state_default())
+THEMES_STOCK = _env_path("ACCORD_THEMES_STOCK", Path("/usr/share/omarchy/themes"))
+THEMES_USER = _env_path("ACCORD_THEMES_USER", HOME / ".config/omarchy/themes")
 STATE_FILE = STATE_DIR / "state.json"
 NO_GSETTINGS = os.environ.get("ACCORD_NO_GSETTINGS") == "1"
 
@@ -438,6 +440,55 @@ def restart_apps():
     return restarted, pending
 
 
+def catalog_themes() -> int:
+    """Write themes.json: every installed theme rendered down to the palette
+    the fitting-room cards paint with. User themes shadow stock ones by id."""
+    entries = {}
+    for base in (THEMES_STOCK, THEMES_USER):
+        if not base.is_dir():
+            continue
+        for d in sorted(base.iterdir()):
+            if not (d / "colors.toml").is_file():
+                continue
+            theme, err = load_theme(d)
+            if theme is None:
+                print(f"accord: skipping theme {d.name}: {err}", file=sys.stderr)
+                continue
+            p = build_palette(theme)
+            entries[d.name] = {
+                "id": d.name,
+                "name": d.name.replace("-", " ").title(),
+                "mode": p["mode"],
+                "source": "user" if base == THEMES_USER else "stock",
+                "palette": {
+                    "window_bg": p["window_bg"], "view_bg": p["view_bg"],
+                    "headerbar_bg": p["headerbar_bg"], "surface_bg": p["surface_bg"],
+                    "sidebar_bg": p["sidebar_bg"], "fg": p["fg"], "muted": p["muted"],
+                    "accent": p["accent"], "on_accent": p["on_accent"],
+                    "red": p["red"], "green": p["green"], "yellow": p["yellow"],
+                },
+            }
+    current = ""
+    try:
+        current = (THEME_DIR.parent / "theme.name").read_text(encoding="utf-8").strip()
+        current = re.sub(r"[^a-z0-9]+", "-", current.lower()).strip("-")
+    except OSError:
+        pass
+    out = {"schemaVersion": 1, "generatedAt": int(time.time()),
+           "current": current, "themes": list(entries.values())}
+    try:
+        STATE_DIR.mkdir(parents=True, exist_ok=True)
+        tmp = STATE_DIR / "themes.json.tmp"
+        tmp.write_text(json.dumps(out, indent=1) + "\n", encoding="utf-8")
+        tmp.replace(STATE_DIR / "themes.json")
+    except OSError as e:
+        print(f"accord: cannot write themes.json: {e}", file=sys.stderr)
+        return 3
+    print(f"accord: cataloged {len(entries)} themes"
+          + (f", current {current}" if current else ""))
+    return 0
+
+
 def do_revert() -> int:
     state = load_state()
     r4 = revert_file(GTK4_CSS)
@@ -480,10 +531,14 @@ def main():
                     help="do not restart windowless GTK daemons")
     ap.add_argument("--revert", action="store_true",
                     help="remove everything accord wrote and restore saved settings")
+    ap.add_argument("--themes", action="store_true",
+                    help="write themes.json - the catalog the fitting room browses")
     args = ap.parse_args()
 
     if args.revert:
         return do_revert()
+    if args.themes:
+        return catalog_themes()
 
     theme, err = load_theme(THEME_DIR)
     if theme is None:

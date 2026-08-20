@@ -4,10 +4,11 @@ import Quickshell.Wayland
 import qs.Commons
 import qs.Ui
 
-// Accord panel: the palette that was actually written, shown as a living
-// preview - a mock libadwaita window painted from state.json, the swatch
-// strip with hex values, and the exact files and settings Accord touched.
-// Keyboard: a applies now, Esc closes.
+// Accord panel: the fitting room. Every installed theme as a card painted
+// from its real palette; the mock window previews the SELECTED theme before
+// anything touches the system. Space tries it on for real (full Omarchy
+// switch + app bridge), Enter keeps it, Esc snaps everything back to the
+// theme you opened with. Below: what is actually applied right now.
 Item {
   id: root
 
@@ -16,15 +17,62 @@ Item {
   property var service: null
   property bool opened: false
 
-  readonly property var pal: service && service.palette ? service.palette : null
   readonly property var st: service && service.state ? service.state : null
+  readonly property var themes: service ? service.themes : []
+  readonly property string wearingId: service ? service.currentThemeId : ""
+
+  property int selectedIndex: -1
+  property string originId: ""
+  readonly property int gridColumns: 4
+
+  // The mock window and swatches preview the selected card; with no card
+  // selected they fall back to what accord-apply actually wrote.
+  readonly property var selectedTheme: selectedIndex >= 0 && selectedIndex < themes.length
+    ? themes[selectedIndex] : null
+  readonly property var pal: selectedTheme && selectedTheme.palette
+    ? selectedTheme.palette
+    : (service && service.palette ? service.palette : null)
 
   function open(payloadJson) {
     root.opened = true
-    Qt.callLater(function() { keyCatcher.forceActiveFocus() })
+    root.originId = ""
+    if (root.service) root.service.refreshThemes()
+    Qt.callLater(function() {
+      root.selectCurrent()
+      keyCatcher.forceActiveFocus()
+    })
   }
   function close() { root.opened = false }
   function toggle() { root.opened ? close() : open("{}") }
+
+  function selectCurrent() {
+    for (var i = 0; i < themes.length; i++) {
+      if (themes[i].id === wearingId) { selectedIndex = i; return }
+    }
+    selectedIndex = themes.length > 0 ? 0 : -1
+  }
+
+  function moveSelection(delta) {
+    if (themes.length === 0) return
+    var next = selectedIndex < 0 ? 0 : selectedIndex + delta
+    if (next < 0 || next >= themes.length) return
+    selectedIndex = next
+    themeGrid.positionViewAtIndex(selectedIndex, GridView.Contain)
+  }
+
+  function trySelected() {
+    if (!root.service || !root.selectedTheme) return
+    if (root.originId === "") root.originId = root.wearingId
+    root.service.tryTheme(root.selectedTheme.id)
+  }
+
+  function snapBack() {
+    // Esc undoes the whole fitting session: back to the theme you came in
+    // wearing, then close. Nothing tried on = just close.
+    if (root.service && root.originId !== "" && root.originId !== root.wearingId)
+      root.service.tryTheme(root.originId)
+    root.close()
+  }
 
   // Surface chrome uses the shell's menu tokens; the mock window deliberately
   // uses raw palette values from state.json - it previews what was written,
@@ -56,7 +104,7 @@ Item {
     BorderSurface {
       id: card
       width: Math.min(Style.space(660), panel.width - Style.gapsOut * 2)
-      height: Math.min(Style.space(600), panel.height - Style.gapsOut * 2)
+      height: Math.min(Style.space(780), panel.height - Style.gapsOut * 2)
       radius: Style.cornerRadius
       anchors.centerIn: parent
       color: root.background
@@ -71,8 +119,16 @@ Item {
         focus: true
         Keys.priority: Keys.BeforeItem
         Keys.onPressed: function(event) {
-          if (event.key === Qt.Key_Escape) { root.close(); event.accepted = true }
-          else if (event.key === Qt.Key_A) {
+          if (event.key === Qt.Key_Escape) { root.snapBack(); event.accepted = true }
+          else if (event.key === Qt.Key_Left) { root.moveSelection(-1); event.accepted = true }
+          else if (event.key === Qt.Key_Right) { root.moveSelection(1); event.accepted = true }
+          else if (event.key === Qt.Key_Up) { root.moveSelection(-root.gridColumns); event.accepted = true }
+          else if (event.key === Qt.Key_Down) { root.moveSelection(root.gridColumns); event.accepted = true }
+          else if (event.key === Qt.Key_Space) { root.trySelected(); event.accepted = true }
+          else if (event.key === Qt.Key_Return || event.key === Qt.Key_Enter) {
+            root.close()
+            event.accepted = true
+          } else if (event.key === Qt.Key_A) {
             if (root.service) root.service.applyNow()
             event.accepted = true
           }
@@ -143,11 +199,134 @@ Item {
           }
         }
 
+        // ------------------------------------------------------ fitting room
+        Item {
+          width: parent.width
+          height: fittingTitle.implicitHeight
+          Text {
+            id: fittingTitle
+            anchors.left: parent.left
+            text: "Fitting room"
+            textFormat: Text.PlainText
+            color: root.foreground
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.title
+            font.bold: true
+          }
+          Text {
+            anchors.right: parent.right
+            anchors.verticalCenter: parent.verticalCenter
+            text: root.service && root.service.switching
+              ? "trying it on…"
+              : (root.themes.length + " themes installed")
+            textFormat: Text.PlainText
+            color: root.foreground
+            opacity: 0.6
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.caption
+          }
+        }
+
+        GridView {
+          id: themeGrid
+          width: parent.width
+          height: Style.space(196)
+          clip: true
+          model: root.themes
+          cellWidth: Math.floor(width / root.gridColumns)
+          cellHeight: Style.space(64)
+          boundsBehavior: Flickable.StopAtBounds
+
+          delegate: Item {
+            required property int index
+            required property var modelData
+            width: themeGrid.cellWidth
+            height: themeGrid.cellHeight
+
+            Rectangle {
+              anchors.fill: parent
+              anchors.margins: Style.space(3)
+              radius: Style.cornerRadius / 2
+              color: modelData.palette.window_bg
+              border.width: index === root.selectedIndex
+                ? Math.max(2, Style.spaceReal(2)) : Math.max(1, Style.spaceReal(1))
+              border.color: index === root.selectedIndex
+                ? root.foreground
+                : (modelData.id === root.wearingId ? modelData.palette.accent : root.borderColor)
+
+              Column {
+                anchors.fill: parent
+                anchors.margins: Style.space(6)
+                spacing: Style.space(3)
+
+                Item {
+                  width: parent.width
+                  height: nameLabel.implicitHeight
+                  Text {
+                    id: nameLabel
+                    anchors.left: parent.left
+                    anchors.right: wearDot.visible ? wearDot.left : parent.right
+                    text: modelData.name
+                    textFormat: Text.PlainText
+                    color: modelData.palette.fg
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.caption
+                    font.bold: true
+                    elide: Text.ElideRight
+                  }
+                  Rectangle {
+                    id: wearDot
+                    visible: modelData.id === root.wearingId
+                    width: Style.space(8); height: width; radius: width / 2
+                    color: modelData.palette.accent
+                    anchors.right: parent.right
+                    anchors.verticalCenter: parent.verticalCenter
+                  }
+                }
+
+                Row {
+                  spacing: Style.space(4)
+                  Repeater {
+                    model: [modelData.palette.headerbar_bg, modelData.palette.view_bg,
+                            modelData.palette.accent, modelData.palette.red,
+                            modelData.palette.green, modelData.palette.yellow]
+                    Rectangle {
+                      required property var modelData
+                      width: Style.space(14); height: Style.space(10)
+                      radius: 2
+                      color: modelData
+                    }
+                  }
+                }
+
+                Text {
+                  text: modelData.mode
+                  textFormat: Text.PlainText
+                  color: modelData.palette.fg
+                  opacity: 0.55
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.caption
+                }
+              }
+
+              MouseArea {
+                anchors.fill: parent
+                hoverEnabled: true
+                cursorShape: Qt.PointingHandCursor
+                onClicked: {
+                  if (root.selectedIndex === parent.parent.index) root.trySelected()
+                  else root.selectedIndex = parent.parent.index
+                }
+              }
+            }
+          }
+        }
+
         // ----------------------------------------- the mock libadwaita window
         Rectangle {
           id: mock
           width: parent.width
-          height: Style.space(240)
+          height: Style.space(200)
           radius: Style.cornerRadius
           color: root.palColor("window_bg", root.background)
           border.color: root.borderColor
@@ -175,7 +354,7 @@ Item {
                   anchors.verticalCenter: parent.verticalCenter
                 }
                 Text {
-                  text: "Files"
+                  text: root.selectedTheme ? "Files - " + root.selectedTheme.name : "Files"
                   textFormat: Text.PlainText
                   color: root.palColor("fg", root.foreground)
                   font.family: root.fontFamily
@@ -263,7 +442,9 @@ Item {
                   spacing: Style.space(8)
 
                   Text {
-                    text: "Every app finally matches."
+                    text: root.selectedTheme && root.selectedTheme.id !== root.wearingId
+                      ? "Preview - press Space to try it for real."
+                      : "Every app finally matches."
                     textFormat: Text.PlainText
                     color: root.palColor("fg", root.foreground)
                     font.family: root.fontFamily
@@ -456,7 +637,7 @@ Item {
         // -------------------------------------------------------- footer
         Text {
           width: parent.width
-          text: "a apply now  ·  Esc close"
+          text: "arrows browse  ·  Space try it on  ·  Enter keep  ·  Esc snap back  ·  a re-apply"
           textFormat: Text.PlainText
           color: root.foreground
           opacity: 0.5

@@ -162,6 +162,75 @@ Item {
     onTriggered: probeProcess.signal(9)
   }
 
+  // ---------------------------------------------------------- fitting room
+  // themes.json - every installed theme reduced to card palettes - is written
+  // by accord-apply --themes; the panel browses it and tries themes on.
+  property var themesCatalog: null
+  property bool switching: false
+
+  readonly property string currentThemeId: themesCatalog && themesCatalog.current
+    ? String(themesCatalog.current) : ""
+  readonly property var themes: themesCatalog && themesCatalog.themes
+    ? themesCatalog.themes : []
+
+  FileView {
+    path: root.stateDir + "/themes.json"
+    watchChanges: true
+    printErrors: false
+    onFileChanged: reload()
+    onLoaded: root.parseThemes(text())
+    onLoadFailed: root.themesCatalog = null
+  }
+
+  function parseThemes(content) {
+    try {
+      var parsed = JSON.parse(String(content || ""))
+      root.themesCatalog = parsed && typeof parsed === "object" ? parsed : null
+    } catch (e) {
+      console.warn("accord", "Ignoring bad themes.json", e)
+      root.themesCatalog = null
+    }
+  }
+
+  Process {
+    id: themesProcess
+    running: false
+    command: [root.pluginDir + "/bin/accord-apply", "--themes"]
+  }
+
+  function refreshThemes() {
+    if (!themesProcess.running) themesProcess.running = true
+  }
+
+  Process {
+    id: themeSetProcess
+    running: false
+    command: ["omarchy-theme-set", "placeholder"]
+    onRunningChanged: if (!running) root.switching = false
+    onExited: function(exitCode, exitStatus) {
+      root.switching = false
+      root.refreshThemes()
+      // Trying a theme on is an explicit request: bridge the apps even when
+      // automatic apply is switched off.
+      root.applyNow()
+    }
+  }
+
+  Timer {
+    interval: 30000
+    running: themeSetProcess.running
+    onTriggered: themeSetProcess.signal(9)
+  }
+
+  function tryTheme(id) {
+    if (themeSetProcess.running || !id) return
+    themeSetProcess.command = ["omarchy-theme-set", String(id)]
+    root.switching = true
+    themeSetProcess.running = true
+  }
+
+  Component.onCompleted: refreshThemes()
+
   function applyNow(firstRun) {
     if (applyProcess.running) return
     var cmd = [root.pluginDir + "/bin/accord-apply"]

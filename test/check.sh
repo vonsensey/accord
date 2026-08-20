@@ -399,6 +399,21 @@ assert "gtk4 css defines exactly 47 colors" \
 assert "gtk3 css defines exactly 22 colors" \
   "$([ "$(grep -c '@define-color' "$css3")" = 22 ]; echo $?)"
 
+# ----------------------------- run 17: --themes catalog for the fitting room
+TH="$WORK/themes-run"; mkdir -p "$TH"
+ACCORD_THEMES_STOCK="/usr/share/omarchy/themes" ACCORD_THEMES_USER="$WORK/does-not-exist" ACCORD_STATE_DIR="$TH" ACCORD_NO_GSETTINGS=1 "$APPLY" --themes >/dev/null
+assert "themes: exits 0 and writes themes.json" "$([ -s "$TH/themes.json" ]; echo $?)"
+assert "themes: all 22 stock themes cataloged"   "$(jq -e '.themes | length == 22' "$TH/themes.json" >/dev/null; echo $?)"
+assert "themes: every entry has id, name, mode, and a full card palette"   "$(jq -e '[.themes[] | select(.id and .name and (.mode=="dark" or .mode=="light") and .palette.window_bg and .palette.headerbar_bg and .palette.fg and .palette.accent and .palette.on_accent)] | length == 22' "$TH/themes.json" >/dev/null; echo $?)"
+assert "themes: exactly 5 light themes flagged"   "$(jq -e '[.themes[] | select(.mode=="light")] | length == 5' "$TH/themes.json" >/dev/null; echo $?)"
+assert "themes: catppuccin-latte id present with correct accent"   "$(jq -e '.themes[] | select(.id=="catppuccin-latte") | .palette.accent == "#1e66f5"' "$TH/themes.json" >/dev/null; echo $?)"
+# user themes dir merges in and wins name collisions
+UT="$WORK/user-themes/my-theme"; mkdir -p "$UT"
+cp "$HERE/fixtures/accord-dark/colors.toml" "$UT/"
+ACCORD_THEMES_STOCK="/usr/share/omarchy/themes" ACCORD_THEMES_USER="$WORK/user-themes" ACCORD_STATE_DIR="$TH" ACCORD_NO_GSETTINGS=1 "$APPLY" --themes >/dev/null
+assert "themes: user theme merged into the catalog"   "$(jq -e '.themes | length == 23 and ([.[] | select(.id=="my-theme")] | length == 1)' "$TH/themes.json" >/dev/null; echo $?)"
+assert "themes: a broken user theme is skipped, not fatal"   "$(mkdir -p "$WORK/user-themes/broken"; printf "mode = [nope\n" > "$WORK/user-themes/broken/colors.toml";      ACCORD_THEMES_STOCK=/usr/share/omarchy/themes ACCORD_THEMES_USER="$WORK/user-themes"      ACCORD_STATE_DIR="$TH" ACCORD_NO_GSETTINGS=1 "$APPLY" --themes >/dev/null &&      jq -e '.themes | length == 23' "$TH/themes.json" >/dev/null; echo $?)"
+
 echo
 if [ "$FAILED" = "0" ]; then
   echo "ALL CHECKS PASSED"
