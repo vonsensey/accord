@@ -416,6 +416,20 @@ ACCORD_THEMES_STOCK="/usr/share/omarchy/themes" ACCORD_THEMES_USER="$WORK/user-t
 assert "themes: user theme merged into the catalog"   "$(jq -e '.themes | length == 23 and ([.[] | select(.id=="my-theme")] | length == 1)' "$TH/themes.json" >/dev/null; echo $?)"
 assert "themes: a broken user theme is skipped, not fatal"   "$(mkdir -p "$WORK/user-themes/broken"; printf "mode = [nope\n" > "$WORK/user-themes/broken/colors.toml";      ACCORD_THEMES_STOCK=/usr/share/omarchy/themes ACCORD_THEMES_USER="$WORK/user-themes"      ACCORD_STATE_DIR="$TH" ACCORD_NO_GSETTINGS=1 "$APPLY" --themes >/dev/null &&      jq -e '.themes | length == 23' "$TH/themes.json" >/dev/null; echo $?)"
 
+# -------------------- run 18: pre-planted tmp symlink cannot redirect writes
+SL="$WORK/symlink-tmp"; mkdir -p "$SL/gtk-4.0"
+printf 'precious\n' > "$SL/victim.txt"
+ln -s "$SL/victim.txt" "$SL/gtk-4.0/gtk.css.accord-tmp"
+ln -s "$SL/victim.txt" "$SL/state/state.json.tmp" 2>/dev/null || { mkdir -p "$SL/state"; ln -s "$SL/victim.txt" "$SL/state/state.json.tmp"; }
+ACCORD_THEME_DIR="$HERE/fixtures/accord-dark" \
+ACCORD_GTK4_CSS="$SL/gtk-4.0/gtk.css" ACCORD_GTK3_CSS="$SL/gtk3.css" \
+ACCORD_STATE_DIR="$SL/state" ACCORD_NO_GSETTINGS=1 "$APPLY" --no-restart >/dev/null
+assert "symlink-tmp: victim file is untouched (no redirected write)" \
+  "$([ "$(cat "$SL/victim.txt")" = precious ]; echo $?)"
+assert "symlink-tmp: css and state written normally despite planted links" \
+  "$(grep -q 'accord:managed' "$SL/gtk-4.0/gtk.css" && jq -e '.schemaVersion == 1' "$SL/state/state.json" >/dev/null; echo $?)"
+
+echo
 echo
 if [ "$FAILED" = "0" ]; then
   echo "ALL CHECKS PASSED"

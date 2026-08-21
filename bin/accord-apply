@@ -24,6 +24,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
 import tomllib
 from pathlib import Path
@@ -71,11 +72,26 @@ def read_file(path: Path) -> str:
     return path.read_text(**ENC)
 
 
-def atomic_write(path: Path, text: str):
-    # tmp sibling + replace: a kill mid-write can never truncate the live file.
-    tmp = path.with_name(path.name + ".accord-tmp")
-    tmp.write_text(text, **ENC)
-    tmp.replace(path)
+def atomic_write(path: Path, text: str, enc=None):
+    # tmp sibling + replace: a kill mid-write can never truncate the live
+    # file. The tmp name is RANDOM and created O_CREAT|O_EXCL|O_NOFOLLOW
+    # (mkstemp): a symlink pre-planted at a predictable tmp path would
+    # otherwise receive the truncating write. fchmod keeps the customary
+    # 0644 the previous default-umask writes had.
+    kw = ENC if enc is None else enc
+    fd, tmp = tempfile.mkstemp(dir=str(path.parent),
+                               prefix=f".{path.name}.", suffix=".accord-tmp")
+    try:
+        os.fchmod(fd, 0o644)
+        with os.fdopen(fd, "w", **kw) as f:
+            f.write(text)
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
 
 
 def parse_hex(value):
@@ -369,9 +385,8 @@ def load_state():
 def save_state(state: dict):
     try:
         STATE_DIR.mkdir(parents=True, exist_ok=True)
-        tmp = STATE_FILE.with_suffix(".json.tmp")
-        tmp.write_text(json.dumps(state, indent=1) + "\n", encoding="utf-8")
-        tmp.replace(STATE_FILE)
+        atomic_write(STATE_FILE, json.dumps(state, indent=1) + "\n",
+                     enc={"encoding": "utf-8"})
         return True
     except OSError as e:
         print(f"accord: cannot write {STATE_FILE}: {e}", file=sys.stderr)
@@ -480,9 +495,9 @@ def catalog_themes() -> int:
            "current": current, "themes": list(entries.values())}
     try:
         STATE_DIR.mkdir(parents=True, exist_ok=True)
-        tmp = STATE_DIR / "themes.json.tmp"
-        tmp.write_text(json.dumps(out, indent=1) + "\n", encoding="utf-8")
-        tmp.replace(STATE_DIR / "themes.json")
+        atomic_write(STATE_DIR / "themes.json",
+                     json.dumps(out, indent=1) + "\n",
+                     enc={"encoding": "utf-8"})
     except OSError as e:
         print(f"accord: cannot write themes.json: {e}", file=sys.stderr)
         return 3
