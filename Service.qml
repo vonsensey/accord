@@ -202,6 +202,26 @@ Item {
     if (!themesProcess.running) themesProcess.running = true
   }
 
+  // The authoritative "what am I actually wearing" source: the live
+  // theme.name file, not the asynchronously refreshed themes.json catalog
+  // (whose `current` can be stale and mislead origin capture - marketplace
+  // review finding). Refreshed at panel open and after every switch.
+  property string liveThemeName: ""
+
+  Process {
+    id: liveThemeProcess
+    running: false
+    command: ["cat", root.home + "/.local/state/omarchy/current/theme.name"]
+    stdout: StdioCollector { id: liveThemeOut }
+    onExited: function(code) {
+      if (code === 0) root.liveThemeName = String(liveThemeOut.text).trim()
+    }
+  }
+
+  function refreshLiveTheme() {
+    if (!liveThemeProcess.running) liveThemeProcess.running = true
+  }
+
   Process {
     id: themeSetProcess
     running: false
@@ -210,9 +230,17 @@ Item {
     onExited: function(exitCode, exitStatus) {
       root.switching = false
       root.refreshThemes()
+      root.refreshLiveTheme()
       // Trying a theme on is an explicit request: bridge the apps even when
       // automatic apply is switched off.
       root.applyNow()
+      // A request that arrived mid-switch (Escape queuing the rollback) runs
+      // now instead of having been silently dropped.
+      if (root.queuedThemeId !== "") {
+        var next = root.queuedThemeId
+        root.queuedThemeId = ""
+        if (next !== root.lastSetId) root.tryTheme(next)
+      }
     }
   }
 
@@ -222,14 +250,28 @@ Item {
     onTriggered: themeSetProcess.signal(9)
   }
 
+  // Latest-wins queue for switch requests that arrive while one is running:
+  // dropping them stranded the user on a half-tried theme when Escape fired
+  // during an active apply (marketplace review finding).
+  property string queuedThemeId: ""
+  property string lastSetId: ""
+
   function tryTheme(id) {
-    if (themeSetProcess.running || !id) return
+    if (!id) return
+    if (themeSetProcess.running) {
+      root.queuedThemeId = String(id)
+      return
+    }
+    root.lastSetId = String(id)
     themeSetProcess.command = ["omarchy-theme-set", String(id)]
     root.switching = true
     themeSetProcess.running = true
   }
 
-  Component.onCompleted: refreshThemes()
+  Component.onCompleted: {
+    refreshThemes()
+    refreshLiveTheme()
+  }
 
   function applyNow(firstRun) {
     if (applyProcess.running) return

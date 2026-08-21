@@ -19,7 +19,10 @@ Item {
 
   readonly property var st: service && service.state ? service.state : null
   readonly property var themes: service ? service.themes : []
-  readonly property string wearingId: service ? service.currentThemeId : ""
+  // The live theme.name read is authoritative; the async catalog's `current`
+  // is only a fallback (stale catalog data must never pick the origin).
+  readonly property string wearingId: service
+    ? (service.liveThemeName || service.currentThemeId) : ""
 
   property int selectedIndex: -1
   property string originId: ""
@@ -36,11 +39,23 @@ Item {
   function open(payloadJson) {
     root.opened = true
     root.originId = ""
-    if (root.service) root.service.refreshThemes()
+    if (root.service) {
+      root.service.refreshThemes()
+      // Fresh authoritative read of theme.name; origin is captured from it
+      // the moment it lands (onLiveNameChanged below), never from the
+      // possibly-stale catalog.
+      root.service.refreshLiveTheme()
+      if (root.service.liveThemeName) root.originId = root.service.liveThemeName
+    }
     Qt.callLater(function() {
       root.selectCurrent()
       keyCatcher.forceActiveFocus()
     })
+  }
+
+  readonly property string liveName: service ? service.liveThemeName : ""
+  onLiveNameChanged: {
+    if (opened && originId === "" && liveName !== "") originId = liveName
   }
   function close() { root.opened = false }
   function toggle() { root.opened ? close() : open("{}") }
@@ -62,14 +77,22 @@ Item {
 
   function trySelected() {
     if (!root.service || !root.selectedTheme) return
-    if (root.originId === "") root.originId = root.wearingId
+    // Never try on before the origin is known - snap-back would have no
+    // deterministic target. The live read lands within milliseconds of open.
+    if (root.originId === "") {
+      if (root.service.liveThemeName) root.originId = root.service.liveThemeName
+      else return
+    }
     root.service.tryTheme(root.selectedTheme.id)
   }
 
   function snapBack() {
     // Esc undoes the whole fitting session: back to the theme you came in
-    // wearing, then close. Nothing tried on = just close.
-    if (root.service && root.originId !== "" && root.originId !== root.wearingId)
+    // wearing, then close. If a try-on is still applying, the rollback is
+    // QUEUED behind it (the service serializes switches) instead of being
+    // dropped - Escape mid-apply must never strand the tried theme.
+    if (root.service && root.originId !== ""
+        && (root.service.switching || root.originId !== root.wearingId))
       root.service.tryTheme(root.originId)
     root.close()
   }

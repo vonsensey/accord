@@ -291,12 +291,12 @@ PATH="$FAKEBIN:/usr/bin:/bin" \
 ACCORD_THEME_DIR="$HERE/fixtures/accord-light" \
 ACCORD_GTK4_CSS="$GS/gtk.css" ACCORD_GTK3_CSS="$GS/gtk3.css" \
 ACCORD_STATE_DIR="$GS/state" "$APPLY" --revert >/dev/null
-assert "gsettings: revert falls back to saved originals when theme-set-gnome fails" \
+assert "gsettings: revert restores saved originals (gnome-tool failing is irrelevant)" \
   "$(grep -q 'gtk-theme MyUserTheme' "$GSTATE" && grep -q 'color-scheme prefer-dark' "$GSTATE"; echo $?)"
 
-# Revert path B: when omarchy-theme-set-gnome exists, revert hands the keys
-# back to Omarchy (mode-correct for the CURRENT theme) instead of restoring
-# a possibly-stale snapshot.
+# Revert path B: saved originals are restored FIRST even when
+# omarchy-theme-set-gnome exists - revert means "give me back what I had",
+# never "give me stock" while the user's own settings sit in state.json.
 cat > "$FAKEBIN/omarchy-theme-set-gnome" <<FAKE
 #!/usr/bin/env bash
 grep -v '^gtk-theme ' "$GSTATE" > "$GSTATE.n"; echo "gtk-theme StockCorrect" >> "$GSTATE.n"; mv "$GSTATE.n" "$GSTATE"
@@ -310,7 +310,18 @@ PATH="$FAKEBIN:/usr/bin:/bin" \
 ACCORD_THEME_DIR="$HERE/fixtures/accord-light" \
 ACCORD_GTK4_CSS="$GS/gtk.css" ACCORD_GTK3_CSS="$GS/gtk3.css" \
 ACCORD_STATE_DIR="$GS/state" "$APPLY" --revert >/dev/null
-assert "gsettings: revert prefers handing keys back to omarchy-theme-set-gnome" \
+assert "gsettings: revert restores SAVED originals even when theme-set-gnome exists" \
+  "$(grep -q 'gtk-theme MyUserTheme' "$GSTATE" && ! grep -q StockCorrect "$GSTATE"; echo $?)"
+
+# Revert path C: with NOTHING usable saved, hand the keys to
+# omarchy-theme-set-gnome for mode-correct stock values.
+NS="$WORK/nosaved"; mkdir -p "$NS/state"
+printf '{"schemaVersion":1,"gsettings":{"saved":{}}}\n' > "$NS/state/state.json"
+PATH="$FAKEBIN:/usr/bin:/bin" \
+ACCORD_THEME_DIR="$HERE/fixtures/accord-light" \
+ACCORD_GTK4_CSS="$NS/gtk.css" ACCORD_GTK3_CSS="$NS/gtk3.css" \
+ACCORD_STATE_DIR="$NS/state" "$APPLY" --revert >/dev/null
+assert "gsettings: nothing saved -> falls back to omarchy-theme-set-gnome" \
   "$(grep -q 'gtk-theme StockCorrect' "$GSTATE"; echo $?)"
 rm -f "$FAKEBIN/omarchy-theme-set-gnome"
 

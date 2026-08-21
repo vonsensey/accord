@@ -513,23 +513,26 @@ def do_revert() -> int:
     saved = state.get("gsettings", {}).get("saved") or {}
     restored, failed = [], []
     if not NO_GSETTINGS:
-        # Prefer handing the keys back to Omarchy itself: theme-set-gnome
-        # recomputes mode-correct values for the CURRENT theme, which beats
-        # restoring a snapshot that may predate several theme switches.
-        handed_back = False
-        if shutil.which("omarchy-theme-set-gnome"):
-            try:
-                handed_back = subprocess.run(["omarchy-theme-set-gnome"],
-                                             capture_output=True, timeout=15).returncode == 0
-            except (OSError, subprocess.TimeoutExpired):
-                handed_back = False
-        if handed_back:
-            restored = ["via omarchy-theme-set-gnome"]
-        else:
+        # Revert means "give me back what I had": the saved originals are
+        # restored FIRST whenever they exist - deleting them unrestored
+        # (marketplace review finding) would discard the user's own
+        # pre-accord settings. Only when nothing usable was saved do we hand
+        # the keys to omarchy-theme-set-gnome for mode-correct stock values.
+        if usable_saved(saved):
             for key, value in saved.items():
                 if not value:
                     continue
                 (restored if gsettings_set(key, value) else failed).append(key)
+        else:
+            handed_back = False
+            if shutil.which("omarchy-theme-set-gnome"):
+                try:
+                    handed_back = subprocess.run(["omarchy-theme-set-gnome"],
+                                                 capture_output=True, timeout=15).returncode == 0
+                except (OSError, subprocess.TimeoutExpired):
+                    handed_back = False
+            if handed_back:
+                restored = ["via omarchy-theme-set-gnome"]
     if failed:
         # Keep state.json so the saved originals survive for a retry.
         print(f"accord: reverted css (gtk4: {r4}, gtk3: {r3}) but could not "
